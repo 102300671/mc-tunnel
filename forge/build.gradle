@@ -1,0 +1,111 @@
+// Forge 模组层:应用 ForgeGradle 插件,依赖 core 模块
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'maven-publish'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+// 锁定 Java 17 (Forge 1.20.1 要求)
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+base {
+    archivesName = mod_id
+}
+
+minecraft {
+    mappings channel: mapping_channel, version: mapping_version
+
+    copyIdeResources = true
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+
+            mods {
+                "${mod_id}" {
+                    // 把 core 子项目的源集也注入到 mod 类源
+                    source project(':core').sourceSets.main
+                    source sourceSets.main
+                }
+            }
+        }
+
+        client {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+            args '--nogui'
+        }
+
+        gameTestServer {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+
+        data {
+            workingDirectory project.file('run-data')
+            args '--mod', mod_id, '--all', '--output', file('src/generated/resources/'), '--existing', file('src/main/resources/')
+        }
+    }
+}
+
+// 数据生成输出目录
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+dependencies {
+    // Minecraft Forge
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // 依赖 core 子项目
+    implementation project(':core')
+
+    // SQLite 驱动(供内嵌后端持久化用)
+    implementation 'org.xerial:sqlite-jdbc:3.46.1.0'
+}
+
+// 资源替换:mods.toml / pack.mcmeta 用占位符
+tasks.named('processResources', ProcessResources).configure {
+    var replaceProperties = [
+            minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
+            forge_version: forge_version, forge_version_range: forge_version_range,
+            loader_version_range: loader_version_range,
+            mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
+            mod_authors: mod_authors, mod_description: mod_description,
+    ]
+    inputs.properties replaceProperties
+
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties + [project: project]
+    }
+}
+
+// 模组 jar:把 core 的 class + sqlite 驱动也打进来,这样产物 jar 自包含
+tasks.named('jar', Jar).configure {
+    from(project(':core').sourceSets.main.output)
+    // 打入 sqlite-jdbc(内嵌后端持久化需要)
+    from {
+        configurations.runtimeClasspath.findAll {
+            it.name.startsWith('sqlite-jdbc')
+        }.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes([
+                'Specification-Title'     : mod_id,
+                'Specification-Vendor'    : mod_authors,
+                'Specification-Version'   : '1',
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : mod_authors,
+                'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
+        ])
+    }
+
+    // 反混淆到 stable 36 (Mojang 官方映射),1.20.1 Forge 用户 jar 必须经过 reobf
+    finalizedBy 'reobfJar'
+}

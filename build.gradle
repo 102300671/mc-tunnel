@@ -1,0 +1,15 @@
+// 根项目元数据,子项目自动继承
+version = mod_version
+group = mod_group_id
+
+// 子项目公共配置:仓库 + UTF-8
+// 注意:不在根项目应用 java/forge 插件,避免与子项目插件冲突
+subprojects {
+    repositories {
+        mavenCentral()
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+    }
+}

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MC-Tunnel 控制台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+  h1 { font-size: 1.5em; margin-bottom: 20px; color: #4ade80; }
+  .toolbar { margin-bottom: 16px; display: flex; gap: 10px; align-items: center; }
+  button { background: #4ade80; color: #0f172a; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+  button:hover { background: #22c55e; }
+  button.danger { background: #ef4444; color: #fff; }
+  button.danger:hover { background: #dc2626; }
+  button.warn { background: #f59e0b; color: #0f172a; }
+  button.warn:hover { background: #d97706; }
+  button:disabled { background: #475569; color: #94a3b8; cursor: not-allowed; }
+  .card { background: #16213e; border-radius: 10px; padding: 16px; margin-bottom: 12px; border: 1px solid #334155; }
+  .card h2 { font-size: 1.1em; margin-bottom: 8px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+  .badge.NOT_INSTALLED { background: #475569; }
+  .badge.STOPPED { background: #64748b; }
+  .badge.RUNNING { background: #16a34a; }
+  .badge.ERROR { background: #dc2626; }
+  .meta { font-size: 0.85em; color: #94a3b8; margin: 4px 0; }
+  .meta span { margin-right: 12px; }
+  .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text] { background: #0f172a; border: 1px solid #334155; color: #eee; padding: 6px 10px; border-radius: 6px; width: 200px; }
+  .log { background: #0f172a; border-radius: 6px; padding: 8px; margin-top: 10px; font-family: monospace; font-size: 0.8em; max-height: 150px; overflow-y: auto; white-space: pre-wrap; }
+  /* 聊天 */
+  .chat-messages { background: #0f172a; border-radius: 6px; padding: 10px; height: 240px; overflow-y: auto; margin-bottom: 8px; font-size: 0.9em; }
+  .chat-msg { margin-bottom: 6px; line-height: 1.4; }
+  .chat-msg .sender { color: #4ade80; font-weight: 600; }
+  .chat-msg .time { color: #64748b; font-size: 0.75em; margin-left: 6px; }
+  .chat-input { display: flex; gap: 8px; }
+  .chat-input input { flex: 1; }
+  .chat-status { font-size: 0.8em; margin-bottom: 6px; }
+  .chat-status.on { color: #4ade80; }
+  .chat-status.off { color: #ef4444; }
+</style>
+</head>
+<body>
+  <h1>🛰️ MC-Tunnel 控制台</h1>
+  <div class="toolbar">
+    <button onclick="refresh()">刷新状态</button>
+    <button onclick="toggleAutoRefresh()" id="autoBtn">⏸ 自动刷新:关</button>
+  </div>
+  <div id="tools"></div>
+  <div class="log" id="log">日志区</div>
+
+  <!-- 聊天面板 -->
+  <div class="card" style="margin-top:16px">
+    <h2>💬 跨端聊天</h2>
+    <div class="chat-status" id="chatStatus">连接中...</div>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input">
+      <input type="text" id="nickname" placeholder="昵称" value="玩家" style="width:100px">
+      <input type="text" id="chatInput" placeholder="输入消息..." onkeydown="if(event.key==='Enter')sendChat()">
+      <button onclick="sendChat()">发送</button>
+    </div>
+  </div>
+
+<script>
+const TOOLS = ['ngrok', 'tailscale', 'syncthing'];
+let autoRefresh = false;
+let timer = null;
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent;
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  return { ok: res.ok, data: text };
+}
+
+async function refresh() {
+  const { ok, data } = await api('GET', '/api/status');
+  if (!ok) { log('刷新失败: ' + data); return; }
+  const items = JSON.parse(data);
+  render(items);
+}
+
+function render(items) {
+  const container = document.getElementById('tools');
+  container.innerHTML = '';
+  items.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const installed = item.status !== 'NOT_INSTALLED';
+    const running = item.status === 'RUNNING';
+    card.innerHTML = `
+      <h2>${item.type} <span class="badge ${item.status}">${item.status}</span></h2>
+      <div class="meta">
+        ${item.localPort ? `<span>本地端口: ${item.localPort}</span>` : ''}
+        ${item.publicUrl ? `<span>公网地址: <a href="${item.publicUrl}" target="_blank">${item.publicUrl}</a></span>` : ''}
+        ${item.pid > 0 ? `<span>PID: ${item.pid}</span>` : ''}
+        ${item.error ? `<span style="color:#ef4444">错误: ${item.error}</span>` : ''}
+      </div>
+      <div class="actions">
+        <button class="warn" onclick="install('${item.type.toLowerCase()}')" ${installed ? 'disabled' : ''}>安装</button>
+        ${item.type.toLowerCase() === 'ngrok' ? `
+          <input type="text" id="args-${item.type}" placeholder="http 25565" value="http 25565">
+        ` : ''}
+        <button onclick="start('${item.type.toLowerCase()}')" ${!installed || running ? 'disabled' : ''}>启动</button>
+        <button class="danger" onclick="stop('${item.type.toLowerCase()}')" ${!running ? 'disabled' : ''}>停止</button>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+async function install(type) {
+  log(`安装 ${type}...`);
+  const { ok, data } = await api('POST', `/api/install/${type}`);
+  log(ok ? `${type} 安装完成` : `安装失败: ${data}`);
+  refresh();
+}
+
+async function start(type) {
+  const argsEl = document.getElementById(`args-${type.toUpperCase()}`);
+  const body = {};
+  if (argsEl && argsEl.value.trim()) {
+    body.args = argsEl.value.trim().split(/\s+/);
+  }
+  log(`启动 ${type} ${body.args || ''}...`);
+  const { ok, data } = await api('POST', `/api/start/${type}`, Object.keys(body).length ? body : undefined);
+  log(ok ? `${type} 已启动: ${data}` : `启动失败: ${data}`);
+  refresh();
+}
+
+async function stop(type) {
+  log(`停止 ${type}...`);
+  const { ok, data } = await api('POST', `/api/stop/${type}`);
+  log(ok ? `${type} 已停止` : `停止失败: ${data}`);
+  refresh();
+}
+
+function toggleAutoRefresh() {
+  autoRefresh = !autoRefresh;
+  document.getElementById('autoBtn').textContent = autoRefresh ? '⏸ 自动刷新:开(3s)' : '▶ 自动刷新:关';
+  if (autoRefresh) {
+    timer = setInterval(refresh, 3000);
+  } else {
+    clearInterval(timer);
+  }
+}
+
+refresh();
+
+// ── 聊天 WebSocket ──
+let chatWs = null;
+function connectChat() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.hostname}:8788`;
+  chatWs = new WebSocket(url);
+  const statusEl = document.getElementById('chatStatus');
+
+  chatWs.onopen = () => {
+    statusEl.textContent = '● 已连接';
+    statusEl.className = 'chat-status on';
+  };
+  chatWs.onclose = () => {
+    statusEl.textContent = '● 未连接 (3秒后重连)';
+    statusEl.className = 'chat-status off';
+    setTimeout(connectChat, 3000);
+  };
+  chatWs.onerror = () => {
+    statusEl.textContent = '● 连接错误';
+    statusEl.className = 'chat-status off';
+  };
+  chatWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      addChatMsg(msg);
+    } catch (err) {
+      console.error('chat parse error', err);
+    }
+  };
+}
+
+function addChatMsg(msg) {
+  const el = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg';
+  const time = new Date(msg.timestamp).toLocaleTimeString();
+  div.innerHTML = `<span class="sender">${escapeHtml(msg.sender)}</span>` +
+    `<span class="time">${time}</span><br>${escapeHtml(msg.content)}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text || !chatWs || chatWs.readyState !== 1) return;
+  const nick = document.getElementById('nickname').value.trim() || '玩家';
+  // 消息格式: 昵称:内容,服务端解析后广播
+  chatWs.send(JSON.stringify({ sender: nick, content: text }));
+  input.value = '';
+}
+
+connectChat();
+</script>
+</body>
+</html>

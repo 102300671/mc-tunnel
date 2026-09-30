@@ -1,0 +1,17 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven {
+            name = 'MinecraftForge'
+            url = 'https://maven.minecraftforge.net/'
+        }
+    }
+}
+
+// 启用 Gradle Toolchain auto-provisioning: ARM 设备只有 JDK 21,编译时自动拉 JDK 17
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.7.0'
+}
+
+rootProject.name = 'mc-tunnel'
+include ':core', ':forge', ':standalone'

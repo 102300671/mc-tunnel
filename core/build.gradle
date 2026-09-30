@@ -1,0 +1,24 @@
+// 核心层:纯 Java,不引用 Forge/MC
+// 此模块被 forge 和 standalone 两个子模块依赖
+plugins {
+    id 'java'
+}
+
+// 锁定 Java 17 (通过 foojay-resolver 自动下载)
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+base {
+    archivesName = 'mctunnel-core'
+}
+
+dependencies {
+    // SQLite 驱动(仅后端持久化用;模组端若缺失会自动回退到内存存储)
+    implementation 'org.xerial:sqlite-jdbc:3.46.1.0'
+}
+
+// 简单 jar 任务
+jar {
+    manifest {
+        attributes 'Implementation-Title': 'MC-Tunnel Core'
+    }
+}
