@@ -338,6 +338,9 @@ public class ChatServer {
         }
 
         void sendText(String text) throws IOException {
+            if (closed) {
+                throw new IOException("WebSocket 连接已关闭");
+            }
             byte[] payload = text.getBytes(StandardCharsets.UTF_8);
             ByteArrayOutputStream frame = new ByteArrayOutputStream();
             // FIN + text frame (0x81)

@@ -94,8 +94,16 @@ function render(items) {
     card.className = 'card';
     const installed = item.status !== 'NOT_INSTALLED';
     const running = item.status === 'RUNNING';
+    const tl = item.type.toLowerCase();
+    // 版本行
+    let verInfo = '';
+    if (installed && item.localVersion) verInfo += `已装 v${item.localVersion}`;
+    if (item.latestVersion) verInfo += `${verInfo ? ' | ' : ''}最新 v${item.latestVersion}`;
+    if (item.updateAvailable) verInfo += ' | <span style="color:#f59e0b">可更新</span>';
+    if (item.needsAccount) verInfo += ` | <span style="color:#ef4444">${tl === 'tailscale' ? '未登录' : '未配置 authtoken'}</span>`;
     card.innerHTML = `
       <h2>${item.type} <span class="badge ${item.status}">${item.status}</span></h2>
+      ${verInfo ? `<div class="meta">${verInfo}</div>` : ''}
       <div class="meta">
         ${item.localPort ? `<span>本地端口: ${item.localPort}</span>` : ''}
         ${item.publicUrl ? `<span>公网地址: <a href="${item.publicUrl}" target="_blank">${item.publicUrl}</a></span>` : ''}
@@ -103,22 +111,182 @@ function render(items) {
         ${item.error ? `<span style="color:#ef4444">错误: ${item.error}</span>` : ''}
       </div>
       <div class="actions">
-        <button class="warn" onclick="install('${item.type.toLowerCase()}')" ${installed ? 'disabled' : ''}>安装</button>
-        ${item.type.toLowerCase() === 'ngrok' ? `
-          <input type="text" id="args-${item.type}" placeholder="http 25565" value="http 25565">
-        ` : ''}
-        <button onclick="start('${item.type.toLowerCase()}')" ${!installed || running ? 'disabled' : ''}>启动</button>
-        <button class="danger" onclick="stop('${item.type.toLowerCase()}')" ${!running ? 'disabled' : ''}>停止</button>
+        <button onclick="check('${tl}')">检查更新</button>
+        <button class="warn" onclick="install('${tl}')" ${installed ? 'disabled' : ''}>安装</button>
+        <button class="warn" onclick="update('${tl}')" ${!item.updateAvailable ? 'disabled' : ''}>更新</button>
+        ${tl === 'ngrok' ? `<input type="text" id="args-${item.type}" placeholder="http 25565" value="http 25565">` : ''}
+        <button onclick="start('${tl}')" ${!installed || running ? 'disabled' : ''}>启动</button>
+        <button class="danger" onclick="stop('${tl}')" ${!running ? 'disabled' : ''}>停止</button>
+        <button onclick="locate('${tl}')">指定位置</button>
       </div>
+      ${tl === 'ngrok' && installed ? `
+      <div class="actions">
+        <input type="text" id="token-ngrok" placeholder="粘贴 ngrok Authtoken" style="width:260px">
+        <button onclick="setAuthtoken()">设置 Authtoken</button>
+      </div>` : ''}
+      ${tl === 'tailscale' && installed ? `
+      <div class="meta">守护进程(tailscaled):
+        <span style="color:${item.daemonRunning ? '#4ade80' : '#f59e0b'}">${item.daemonRunning ? '运行中' : '未运行'}</span>
+      </div>
+      <div class="actions">
+        <button onclick="daemon('${tl}', true)" ${item.daemonRunning ? 'disabled' : ''}>启动服务</button>
+        <button class="danger" onclick="daemon('${tl}', false)" ${!item.daemonRunning ? 'disabled' : ''}>停止服务</button>
+      </div>` : ''}
+      ${tl === 'tailscale' && installed && item.needsAccount ? `
+      <div class="actions">
+        <button onclick="tailscaleLogin()">登录 Tailscale(浏览器授权)</button>
+      </div>` : ''}
+      ${tl === 'tailscale' && installed ? `
+      <div class="actions">
+        <button onclick="openMeshWizard()">🌐 虚拟组网向导</button>
+      </div>` : ''}
     `;
     container.appendChild(card);
   });
 }
 
+// ── 检查更新 ──
+async function check(type) {
+  log(`检查 ${type} 更新(官方渠道)...`);
+  const { ok, data } = await api('POST', `/api/check/${type}`);
+  if (!ok) { log(`检查失败: ${data}`); return; }
+  const c = JSON.parse(data);
+  if (!c.installed) {
+    log(`${type} 未安装,最新版: ${c.latestVersion || '未知'}`);
+  } else if (c.updateAvailable) {
+    log(`${type} 已装 v${c.localVersion} → 最新 v${c.latestVersion},可点击"更新"`);
+  } else {
+    log(`${type} 已是最新版 v${c.localVersion},可直接使用`);
+  }
+  refresh();
+}
+
+// ── 安装 ──
 async function install(type) {
-  log(`安装 ${type}...`);
-  const { ok, data } = await api('POST', `/api/install/${type}`);
-  log(ok ? `${type} 安装完成` : `安装失败: ${data}`);
+  let extractDir;
+  // Windows 上的 ngrok:下载 zip 后询问用户解压位置
+  if (type === 'ngrok' && navigator.platform && navigator.platform.indexOf('Win') >= 0) {
+    extractDir = prompt(
+      '将下载 ngrok 官方 zip 并解压。\n请输入解压位置:',
+      'C:\\ngrok');
+    if (extractDir === null) return; // 用户取消
+    extractDir = extractDir.trim() || undefined;
+  }
+  log(`安装 ${type}...(从官方渠道下载)`);
+  const body = extractDir ? { extractDir } : undefined;
+  const { ok, data } = await api('POST', `/api/install/${type}`, body);
+  if (!ok) { log(`安装失败: ${data}`); refresh(); return; }
+  const resp = JSON.parse(data);
+  if (resp.needsExtractDir) {
+    // 服务端也判定需要目录(如前端判定不准),再问一次
+    extractDir = prompt('请输入 ngrok 解压位置:', 'C:\\ngrok');
+    if (extractDir === null) { refresh(); return; }
+    return installWithDir(type, extractDir.trim());
+  }
+  log(`${type} 安装完成`);
+  afterInstall(type, resp);
+  refresh();
+}
+
+async function installWithDir(type, dir) {
+  const { ok, data } = await api('POST', `/api/install/${type}`, { extractDir: dir });
+  if (!ok) { log(`安装失败: ${data}`); refresh(); return; }
+  const resp = JSON.parse(data);
+  log(`${type} 安装完成: ${dir}`);
+  afterInstall(type, resp);
+  refresh();
+}
+
+// 安装后账户引导:仅当服务端返回 needsAccount(未配置 authtoken/未登录)时才询问
+function afterInstall(type, resp) {
+  if (!resp || !resp.needsAccount) return;
+  if (type === 'ngrok') {
+    askNgrokAccount();
+  } else if (type === 'tailscale') {
+    if (confirm('Tailscale 安装完成!\n\n是否现在登录 Tailscale 账户?(将触发 tailscale login,在浏览器中授权)')) {
+      tailscaleLogin();
+    }
+  }
+}
+
+// ── 更新 ──
+async function update(type) {
+  let extractDir;
+  if (type === 'ngrok' && navigator.platform && navigator.platform.indexOf('Win') >= 0) {
+    // 更新场景优先复用上次安装目录,服务端自动处理;这里无需再问
+  }
+  log(`更新 ${type} 到官方最新版...`);
+  const { ok, data } = await api('POST', `/api/update/${type}`, extractDir ? { extractDir } : undefined);
+  if (!ok) { log(`更新失败: ${data}`); refresh(); return; }
+  const resp = JSON.parse(data);
+  if (resp.needsExtractDir) {
+    extractDir = prompt('请输入 ngrok 解压位置:', 'C:\\ngrok');
+    if (extractDir === null) { refresh(); return; }
+    const r2 = await api('POST', `/api/update/${type}`, { extractDir: extractDir.trim() });
+    log(r2.ok ? `${type} 更新完成` : `更新失败: ${r2.data}`);
+    refresh();
+    return;
+  }
+  log(`${type} 更新完成`);
+  refresh();
+}
+
+// ── ngrok 首装后账户引导 ──
+async function askNgrokAccount() {
+  const signupUrl = 'https://dashboard.ngrok.org/signup';
+  const go = confirm(
+    'ngrok 安装完成!\n\n' +
+    '是否注册/登录 ngrok 账户?\n\n' +
+    '区别:\n' +
+    '· 未登录: 无法启动隧道(免费版也需 authtoken)\n' +
+    '· 登录后: 获得免费的 Authtoken,可正常开隧道\n\n' +
+    '点"确定"将打开 ngrok 官网注册/登录页。');
+  if (!go) {
+    log('已跳过账户配置,稍后可在 ngrok 卡片粘贴 Authtoken');
+    return;
+  }
+  window.open(signupUrl, '_blank');
+  log('已尝试打开官网,若浏览器未弹出请手动访问: ' + signupUrl);
+  const token = prompt(
+    '登录后,在 Dashboard → Cloud Edge → Authtoken 页面复制你的 Authtoken,粘贴到下面:\n\n' +
+    '(注册/登录页: ' + signupUrl + ')');
+  if (!token || !token.trim()) {
+    log('未提供 Authtoken,稍后可在 ngrok 卡片粘贴设置');
+    return;
+  }
+  const { ok, data } = await api('POST', '/api/configure/ngrok', { authtoken: token.trim() });
+  log(ok ? 'Authtoken 已配置(ngrok config add-authtoken)' : `配置失败: ${data}`);
+  refresh();
+}
+
+// ── 卡片内直接设置 authtoken ──
+async function setAuthtoken() {
+  const el = document.getElementById('token-ngrok');
+  const token = el && el.value.trim();
+  if (!token) { log('请先粘贴 Authtoken'); return; }
+  const { ok, data } = await api('POST', '/api/configure/ngrok', { authtoken: token });
+  log(ok ? 'Authtoken 已配置' : `配置失败: ${data}`);
+  refresh();
+}
+
+// ── tailscale 登录(触发 tailscale login,浏览器授权) ──
+async function tailscaleLogin() {
+  log('已触发 tailscale login,请在打开的浏览器页面完成授权(最长 180s)...');
+  const { ok, data } = await api('POST', '/api/configure/tailscale', { login: 'true' });
+  log(ok ? '登录流程已发起,授权完成后刷新即可看到状态变化' : `失败: ${data}`);
+  refresh();
+}
+
+// ── 指定已有工具位置(用户已自行安装的场景) ──
+async function locate(type) {
+  const path = prompt(
+    `输入 ${type} 可执行文件的完整路径,或其所在目录:\n\n` +
+    '例如: C:\\Program Files\\Tailscale 或 D:\\tools\\ngrok.exe\n' +
+    '(模组将直接使用该位置的工具,不再下载安装)');
+  if (!path || !path.trim()) return;
+  log(`指定 ${type} 位置: ${path.trim()}`);
+  const { ok, data } = await api('POST', `/api/configure/${type}`, { binaryPath: path.trim() });
+  log(ok ? `${type} 位置已记录并生效` : `失败: ${data}`);
   refresh();
 }
 
@@ -139,6 +307,215 @@ async function stop(type) {
   const { ok, data } = await api('POST', `/api/stop/${type}`);
   log(ok ? `${type} 已停止` : `停止失败: ${data}`);
   refresh();
+}
+
+// ── 守护进程(tailscaled)启停 ──
+async function daemon(type, start) {
+  const act = start ? '启动' : '停止';
+  log(`${act} ${type} 守护进程...`);
+  let { ok, data } = await api('POST', `/api/daemon-${start ? 'start' : 'stop'}/${type}`);
+  // 非 root 需要 sudo 密码:最多安全收集 3 次(密码错误可重试)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let needPw = false;
+    if (ok) {
+      try { needPw = JSON.parse(data).needsSudoPassword === true; } catch (e) {}
+    }
+    if (!needPw) break;
+    const pw = await promptSudoPassword(act);
+    if (pw == null) { log('已取消'); refresh(); return; }
+    ({ ok, data } = await api('POST',
+      `/api/daemon-${start ? 'start' : 'stop'}/${type}`, { sudoPassword: pw }));
+    if (ok) break;
+    let msg = data;
+    try { msg = JSON.parse(data).error || data; } catch (e) {}
+    // 密码错误 → 继续循环重新输入;其他错误直接结束
+    if (!String(msg).includes('sudo 密码错误')) {
+      log(`${act}守护进程失败: ${msg}`);
+      refresh();
+      return;
+    }
+    log('sudo 密码错误,请重试。');
+  }
+  if (!ok) {
+    let msg = data;
+    try { msg = JSON.parse(data).error || data; } catch (e) {}
+    log(`${act}守护进程失败: ${msg}`);
+  } else {
+    log(`${type} 守护进程已${start ? '启动' : '停止'}`);
+  }
+  refresh();
+}
+
+/**
+ * 收集 sudo 密码:type=password 不回显,并向用户明示安全保证.
+ * 密码仅用于本次 sudo systemctl,不记录、不保存、不出现在日志中.
+ */
+function promptSudoPassword(act) {
+  // 简单遮罩输入(浏览器原生 prompt 不支持 password,这里自建 DOM 弹层)
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.style.cssText =
+      'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;' +
+      'display:flex;align-items:center;justify-content:center';
+    mask.innerHTML =
+      '<div style="background:#2b2b2b;color:#eee;border:1px solid #555;border-radius:8px;' +
+      'padding:20px 22px;width:420px;font-size:14px">' +
+      '<div style="font-size:15px;margin-bottom:8px">需要 sudo 密码才能 ' + act + ' tailscaled 服务</div>' +
+      '<div style="color:#9fd49a;margin-bottom:10px;line-height:1.5">' +
+      '安全保证:密码仅在本次操作中经 sudo 标准输入使用,<b>不会显示、不会被记录、不会保存到任何文件</b>。' +
+      '</div>' +
+      '<input id="mct-sudo-pw" type="password" autocomplete="off" autofocus ' +
+      'style="width:100%;box-sizing:border-box;padding:7px;border-radius:4px;border:1px solid #777;' +
+      'background:#1e1e1e;color:#eee" placeholder="sudo 密码">' +
+      '<div style="margin-top:14px;text-align:right">' +
+      '<button id="mct-sudo-cancel" style="margin-right:8px">取消</button>' +
+      '<button id="mct-sudo-ok" style="font-weight:bold">确认</button></div></div>';
+    document.body.appendChild(mask);
+    const input = mask.querySelector('#mct-sudo-pw');
+    input.focus();
+    const done = (val) => { document.body.removeChild(mask); resolve(val); };
+    mask.querySelector('#mct-sudo-ok').onclick = () => done(input.value);
+    mask.querySelector('#mct-sudo-cancel').onclick = () => done(null);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') done(input.value);
+      if (e.key === 'Escape') done(null);
+    });
+  });
+}
+
+// ── Tailscale 虚拟组网向导 ──
+let meshMode = '1';
+
+function openMeshWizard() {
+  if (document.getElementById('mct-mesh-mask')) return;
+  const box = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;' +
+    'display:flex;align-items:center;justify-content:center';
+  const panel = 'background:#2b2b2b;color:#eee;border:1px solid #555;border-radius:8px;' +
+    'padding:18px 20px;width:600px;max-height:88vh;overflow:auto;font-size:13px';
+  const input = 'width:100%;box-sizing:border-box;padding:7px;border-radius:4px;' +
+    'border:1px solid #777;background:#1e1e1e;color:#eee;margin-top:6px';
+  const btn = 'padding:6px 12px;border-radius:4px;border:1px solid #888;' +
+    'background:#3a3a3a;color:#eee;cursor:pointer';
+  const mask = document.createElement('div');
+  mask.id = 'mct-mesh-mask';
+  mask.style.cssText = box;
+  mask.innerHTML =
+    '<div style="' + panel + '">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+        '<b style="font-size:15px">Tailscale 虚拟组网向导</b>' +
+        '<button id="mct-mesh-close" style="' + btn + '">✕</button></div>' +
+      '<div style="margin-bottom:12px">' +
+        '<button id="mct-role-host" class="mct-role" style="' + btn + ';font-weight:bold">我是房主(开服)</button> ' +
+        '<button id="mct-role-guest" class="mct-role" style="' + btn + '">我是成员(加入)</button></div>' +
+      '<div id="mct-host-panel">' +
+        '<div style="color:#9fd49a;margin-bottom:8px">选择组网方式:</div>' +
+        '<div id="mct-mode-1" class="mct-mode" style="border:1px solid #777;border-radius:6px;padding:9px;margin-bottom:7px;cursor:pointer">' +
+          '<b>方式1 · 共用一个账号</b><br><span style="color:#bbb">房主创建账号,所有人登录同一个 Tailscale 账号。最简单,成员能看到账号下全部设备。</span></div>' +
+        '<div id="mct-mode-2" class="mct-mode" style="border:1px solid #777;border-radius:6px;padding:9px;margin-bottom:7px;cursor:pointer">' +
+          '<b>方式2 · 分享本机设备</b><br><span style="color:#bbb">成员各自注册账号,房主只把开服设备按邮箱分享给他们(成员被隔离,只能连本机)。需要 API 令牌。</span></div>' +
+        '<div id="mct-mode-3" class="mct-mode" style="border:1px solid #777;border-radius:6px;padding:9px;margin-bottom:10px;cursor:pointer">' +
+          '<b>方式3 · 邀请加入同一 tailnet</b><br><span style="color:#bbb">成员各自注册账号,房主按邮箱邀请他们加入同一网络(member 角色)。需要 API 令牌。</span></div>' +
+        '<div id="mct-pane-1" style="line-height:1.7">' +
+          '房主先登录自己的账号,再让每位成员也登录<b>同一个账号</b>,最后在 MC 里直接连接房主的 Tailscale IP。' +
+          '<div style="margin-top:10px"><button id="mct-go-login" style="' + btn + ';font-weight:bold">去登录 Tailscale(浏览器授权)</button></div></div>' +
+        '<div id="mct-pane-23" style="display:none">' +
+          '<div style="color:#9fd49a">1. API 访问令牌(在 ' +
+          '<a href="https://login.tailscale.com/admin/settings/keys" target="_blank" style="color:#7db7ff">' +
+          'admin → Settings → API access tokens</a> 生成,tskey- 开头,最长 90 天):</div>' +
+          '<input id="mct-token" type="password" autocomplete="off" placeholder="粘贴 tskey-api-...(保存后复用)" style="' + input + '">' +
+          '<div style="margin-top:6px"><button id="mct-save-token" style="' + btn + '">验证并保存令牌</button> ' +
+          '<button id="mct-clear-token" style="' + btn + '">清除已存令牌</button></div>' +
+          '<div style="color:#9fd49a;margin-top:12px">2. 成员邮箱(多个用逗号或换行分隔):</div>' +
+          '<textarea id="mct-emails" rows="3" style="' + input + '" placeholder="alice@example.com, bob@example.com"></textarea>' +
+          '<div style="margin-top:10px"><button id="mct-run" style="' + btn + ';font-weight:bold">执行</button></div>' +
+        '</div>' +
+        '<div id="mct-result" style="margin-top:10px;white-space:pre-wrap;line-height:1.6"></div>' +
+      '</div>' +
+      '<div id="mct-guest-panel" style="display:none;line-height:1.8">' +
+        '<b>先安装并登录 Tailscale,然后按房主的方式操作:</b><br>' +
+        '· <b>方式1</b>:运行 tailscale login,登录房主给的同一个账号<br>' +
+        '· <b>方式2</b>:打开 Tailscale 分享邮件 → 点接受,设备出现在客户端后,用房主给的 100.x.x.x 联机<br>' +
+        '· <b>方式3</b>:打开邀请邮件 → 接受邀请 → tailscale login 登录自己的账号,再用 100.x.x.x 联机<br>' +
+        '<span style="color:#f59e0b">联机时保持 Tailscale 状态为 Connected。</span></div>' +
+    '</div>';
+  document.body.appendChild(mask);
+
+  const close = () => document.body.removeChild(mask);
+  mask.querySelector('#mct-mesh-close').onclick = close;
+  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
+  mask.querySelector('#mct-role-host').onclick = () => meshSwitchRole(true);
+  mask.querySelector('#mct-role-guest').onclick = () => meshSwitchRole(false);
+  for (let i = 1; i <= 3; i++) {
+    mask.querySelector('#mct-mode-' + i).onclick = () => meshSelectMode(String(i));
+  }
+  mask.querySelector('#mct-go-login').onclick = () => { close(); tailscaleLogin(); };
+  mask.querySelector('#mct-save-token').onclick = meshSaveToken;
+  mask.querySelector('#mct-clear-token').onclick = meshClearToken;
+  mask.querySelector('#mct-run').onclick = meshRun;
+  meshSelectMode('1');
+}
+
+function meshSwitchRole(isHost) {
+  const mask = document.getElementById('mct-mesh-mask');
+  mask.querySelector('#mct-host-panel').style.display = isHost ? '' : 'none';
+  mask.querySelector('#mct-guest-panel').style.display = isHost ? 'none' : '';
+  mask.querySelector('#mct-role-host').style.fontWeight = isHost ? 'bold' : 'normal';
+  mask.querySelector('#mct-role-guest').style.fontWeight = isHost ? 'normal' : 'bold';
+}
+
+function meshSelectMode(n) {
+  meshMode = n;
+  const mask = document.getElementById('mct-mesh-mask');
+  for (let i = 1; i <= 3; i++) {
+    mask.querySelector('#mct-mode-' + i).style.borderColor = i === Number(n) ? '#4ade80' : '#777';
+    mask.querySelector('#mct-mode-' + i).style.background = i === Number(n) ? '#33402f' : 'transparent';
+  }
+  mask.querySelector('#mct-pane-1').style.display = n === '1' ? '' : 'none';
+  mask.querySelector('#mct-pane-23').style.display = n === '1' ? 'none' : '';
+  mask.querySelector('#mct-run').textContent = n === '2' ? '分享本机给以上邮箱' : '发送 tailnet 邀请';
+  mask.querySelector('#mct-result').textContent = '';
+}
+
+function meshResult(ok, text) {
+  const el = document.getElementById('mct-result');
+  el.style.color = ok ? '#4ade80' : '#f87171';
+  el.textContent = text;
+  log(text);
+}
+
+async function meshSaveToken() {
+  const t = document.getElementById('mct-token').value.trim();
+  if (!t) { meshResult(false, '请先粘贴令牌'); return; }
+  const { ok, data } = await api('POST', '/api/mesh/tailscale/token', { apiToken: t });
+  if (ok) {
+    document.getElementById('mct-token').value = '';
+    meshResult(true, '令牌有效,已保存。');
+  } else {
+    meshResult(false, '令牌保存失败: ' + data);
+  }
+}
+
+async function meshClearToken() {
+  const { ok, data } = await api('POST', '/api/mesh/tailscale/clear-token');
+  meshResult(ok, ok ? '已存令牌已清除。' : '清除失败: ' + data);
+}
+
+async function meshRun() {
+  const emails = document.getElementById('mct-emails').value.trim();
+  if (!emails) { meshResult(false, '请输入至少一个成员邮箱'); return; }
+  const path = meshMode === '2' ? 'share' : 'invite';
+  const act = meshMode === '2' ? '分享设备' : '发送 tailnet 邀请';
+  meshResult(true, '正在' + act + '...');
+  const { ok, data } = await api('POST', '/api/mesh/tailscale/' + path, { emails });
+  if (ok) {
+    let msg = data;
+    try { msg = JSON.parse(data).result || data; } catch (e) {}
+    meshResult(true, msg);
+  } else {
+    let msg = data;
+    try { msg = JSON.parse(data).error || data; } catch (e) {}
+    meshResult(false, act + '失败: ' + msg);
+  }
 }
 
 function toggleAutoRefresh() {

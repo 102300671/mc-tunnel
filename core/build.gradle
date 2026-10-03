@@ -1,5 +1,5 @@
 // 核心层:纯 Java,不引用 Forge/MC
-// 此模块被 forge 和 standalone 两个子模块依赖
+// 此模块被 forge 子模块依赖,内含 CLI/WebUI 入口(io.mctunnel.core.cli.Main)
 plugins {
     id 'java'
 }
@@ -14,6 +14,9 @@ base {
 dependencies {
     // SQLite 驱动(仅后端持久化用;模组端若缺失会自动回退到内存存储)
     implementation 'org.xerial:sqlite-jdbc:3.46.1.0'
+    // slf4j: sqlite-jdbc 依赖;Forge 环境自带,独立运行时用 nop 静默绑定
+    implementation 'org.slf4j:slf4j-api:2.0.13'
+    implementation 'org.slf4j:slf4j-nop:2.0.13'
 }
 
 // 简单 jar 任务

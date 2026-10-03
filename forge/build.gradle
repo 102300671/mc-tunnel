@@ -84,18 +84,32 @@ tasks.named('processResources', ProcessResources).configure {
 }
 
 // 模组 jar:把 core 的 class + sqlite 驱动也打进来,这样产物 jar 自包含
+// 注意 slf4j 不能展开打入:Forge 启动层已有 org.slf4j 模块,展开 slf4j-api 会造成
+// split package(ResolutionException: Module mctunnel contains package org.slf4j.spi),
+// 游戏在模组加载前即崩溃。slf4j-api/nop 仅独立运行(java -jar)需要,以整包资源形式
+// 嵌入 standalone-lib/,由 io.mctunnel.core.bootstrap.StandaloneLauncher 解包加载。
 tasks.named('jar', Jar).configure {
     from(project(':core').sourceSets.main.output)
-    // 打入 sqlite-jdbc(内嵌后端持久化需要)
+    // 只展开 sqlite-jdbc(内嵌后端持久化需要;游戏内 slf4j 由 Forge 提供)
     from {
         configurations.runtimeClasspath.findAll {
             it.name.startsWith('sqlite-jdbc')
         }.collect { it.isDirectory() ? it : zipTree(it) }
     }
+    // slf4j-api + slf4j-nop:独立运行时的嵌套库(启动器解包,Forge 加载时忽略)
+    into('standalone-lib') {
+        from configurations.runtimeClasspath.findAll {
+            it.name.startsWith('slf4j-api') || it.name.startsWith('slf4j-nop')
+        }
+    }
+    // 第三方多版本 jar 自带的 module-info 只是资源,不应出现在本 fat jar 中
+    exclude 'META-INF/versions/9/module-info.class'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     manifest {
         attributes([
+                // 独立运行入口:先加载 standalone-lib 中的 slf4j,再进入真正的 CLI Main
+                'Main-Class'              : 'io.mctunnel.core.bootstrap.StandaloneLauncher',
                 'Specification-Title'     : mod_id,
                 'Specification-Vendor'    : mod_authors,
                 'Specification-Version'   : '1',

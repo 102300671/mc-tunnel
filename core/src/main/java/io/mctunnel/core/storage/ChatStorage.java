@@ -4,13 +4,11 @@ import io.mctunnel.core.chat.ChatMessage;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,7 +24,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * 若驱动不可用(如未打 fat jar 的模组内嵌场景),自动回退到内存存储,
  * 保证功能不崩溃,只是不持久化.
  * <p>
- * 数据存储位置: {user.home}/.mctunnel/mctunnel.db
+ * 数据存储位置: {DataDir}/mctunnel.db
  * <p>
  * 表结构:
  * <ul>
@@ -35,10 +33,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li>nodes(node_id, address, last_seen)</li>
  * </ul>
  */
-public final class ChatStorage {
-
-    private static final String DB_DIR = ".mctunnel";
-    private static final String DB_FILE = "mctunnel.db";
+public final class ChatStorage implements io.mctunnel.core.tunnel.ToolConfigStore {
 
     private final boolean sqliteAvailable;
     private Connection conn;
@@ -55,7 +50,7 @@ public final class ChatStorage {
     private boolean initSqlite() {
         try {
             Class.forName("org.sqlite.JDBC");
-            Path dbPath = Paths.get(System.getProperty("user.home"), DB_DIR, DB_FILE);
+            Path dbPath = io.mctunnel.core.DataDir.dbFile();
             Files.createDirectories(dbPath.getParent());
             conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
             createTables();
@@ -208,6 +203,18 @@ public final class ChatStorage {
             System.err.println("[MC-Tunnel] loadConfig failed: " + e.getMessage());
         }
         return map;
+    }
+
+    // ── ToolConfigStore 接口(工具元数据存取) ─────────────
+
+    @Override
+    public String get(String tool, String key) {
+        return loadConfig(tool).get(key);
+    }
+
+    @Override
+    public void put(String tool, String key, String value) {
+        saveConfig(tool, key, value);
     }
 
     // ── 节点列表 ──────────────────────────────────────────

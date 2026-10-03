@@ -14,4 +14,4 @@ plugins {
 }
 
 rootProject.name = 'mc-tunnel'
-include ':core', ':forge', ':standalone'
+include ':core', ':forge'

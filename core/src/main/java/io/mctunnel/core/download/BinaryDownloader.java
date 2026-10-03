@@ -12,9 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -22,12 +20,13 @@ import java.util.zip.ZipInputStream;
  * 工具二进制下载器.
  * <p>
  * 负责从官方 URL 下载工具二进制到本地缓存,并解压.
- * 缓存目录: {user.home}/.mctunnel/binaries/{toolName}/{platform}/
+ * 缓存目录: {DataDir}/binaries/{toolName}/{platform}/
  */
 public final class BinaryDownloader {
 
-    private static final Path CACHE_ROOT = Paths.get(
-            System.getProperty("user.home"), ".mctunnel", "binaries");
+    private static Path cacheRoot() {
+        return io.mctunnel.core.DataDir.binaries();
+    }
 
     private final HttpClient httpClient;
 
@@ -48,16 +47,14 @@ public final class BinaryDownloader {
      * @throws IOException 下载或解压失败
      */
     public Path downloadAndExtract(String toolName, String url, Platform platform) throws IOException {
-        Path toolDir = CACHE_ROOT.resolve(toolName).resolve(platform.name().toLowerCase());
+        Path toolDir = cacheRoot().resolve(toolName).resolve(platform.name().toLowerCase());
         Files.createDirectories(toolDir);
 
         // 下载压缩包到临时文件
-        String fileName = url.substring(url.lastIndexOf('/') + 1);
+        String fileName = fileNameOf(url);
         Path archive = toolDir.resolve(fileName);
 
-        if (!Files.exists(archive)) {
-            download(url, archive);
-        }
+        download(url, archive, false);
 
         // 解压
         extract(archive, toolDir, fileName);
@@ -65,12 +62,82 @@ public final class BinaryDownloader {
         return toolDir;
     }
 
+    /**
+     * 下载文件到指定路径.
+     *
+     * @param url   下载 URL
+     * @param target 目标文件路径
+     * @param force true 表示覆盖已有文件(强制重新下载)
+     * @return 目标文件路径
+     * @throws IOException 下载失败
+     */
+    public Path download(String url, Path target, boolean force) throws IOException {
+        if (!force && Files.exists(target) && Files.size(target) > 0) {
+            return target;
+        }
+        Files.createDirectories(target.getParent());
+        download(url, target);
+        return target;
+    }
+
+    /**
+     * 解压压缩包(zip/tgz/tar.gz)到目标目录;非压缩文件直接复制.
+     *
+     * @param archive   压缩包路径
+     * @param targetDir 解压目标目录
+     * @throws IOException 解压失败
+     */
+    public void extractArchive(Path archive, Path targetDir) throws IOException {
+        Files.createDirectories(targetDir);
+        extract(archive, targetDir, archive.getFileName().toString());
+    }
+
+    /** 从 URL 提取文件名 */
+    public static String fileNameOf(String url) {
+        return url.substring(url.lastIndexOf('/') + 1);
+    }
+
+    /** 下载重试次数 */
+    private static final int DOWNLOAD_RETRIES = 3;
+
     private void download(String url, Path target) throws IOException {
-        HttpRequest request = HttpRequest.newBuilder()
+        IOException last = null;
+        for (int attempt = 1; attempt <= DOWNLOAD_RETRIES; attempt++) {
+            try {
+                downloadOnce(url, target, attempt > 1);
+                return;
+            } catch (IOException e) {
+                last = e;
+                // 清理半截文件,避免残留损坏包
+                try {
+                    Files.deleteIfExists(target);
+                } catch (IOException ignored) {
+                }
+                if (attempt < DOWNLOAD_RETRIES) {
+                    System.err.println("[MC-Tunnel] 下载失败(第" + attempt + "次): "
+                            + e.getMessage() + ",重试中...");
+                    try {
+                        Thread.sleep(1500L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Download interrupted", ie);
+                    }
+                }
+            }
+        }
+        throw last;
+    }
+
+    /** forceHttp1: HTTP/2 在部分网络下会中途 EOF,重试时降级 HTTP/1.1 */
+    private void downloadOnce(String url, Path target, boolean forceHttp1) throws IOException {
+        HttpRequest.Builder rb = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofMinutes(5))
-                .GET()
-                .build();
+                .GET();
+        if (forceHttp1) {
+            rb.version(HttpClient.Version.HTTP_1_1);
+        }
+        HttpRequest request = rb.build();
 
         try {
             HttpResponse<InputStream> response = httpClient.send(

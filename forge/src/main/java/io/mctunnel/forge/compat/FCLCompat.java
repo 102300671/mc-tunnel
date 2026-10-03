@@ -142,9 +142,4 @@ public class FCLCompat {
         System.err.println("[MC-Tunnel] openBrowser failed: " + errors);
         return errors.toString();
     }
-
-    private static boolean isAndroid() {
-        return System.getProperty("java.vendor", "").toLowerCase().contains("android")
-                || System.getProperty("os.name", "").toLowerCase().contains("android");
-    }
 }

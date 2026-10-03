@@ -8,20 +8,20 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * HTTP 客户端,调用后端服务(standalone jar 内嵌的 WebServer)的 REST API.
+ * HTTP 客户端,调用后端服务(同一 jar 以 serve 模式运行的 WebServer)的 REST API.
  * <p>
- * 模组层和任何上层都只通过此客户端操作工具,不直接调用二进制.
- * 桌面端: 后端服务由模组内嵌启动(localhost).
- * Android: 后端服务跑在 Termux,地址可配置.
+ * 仅远程模式使用(Android: 后端跑在 Termux,地址可配置).
+ * 桌面端模组内嵌直连工具,不经过此客户端.
  */
 public class TunnelClient {
 
     private static final Pattern FIELD_PATTERN =
-            Pattern.compile("\"(\\w+)\":(\"[^\"]*\"|null|-?\\d+)");
+            Pattern.compile("\"(\\w+)\":(\"[^\"]*\"|null|true|false|-?\\d+)");
 
     private final String baseUrl;
     private final HttpClient httpClient;
@@ -41,9 +41,81 @@ public class TunnelClient {
         return parseInfoArray(json);
     }
 
-    /** 安装工具 */
+    /** 检查更新 */
+    public UpdateCheck checkUpdate(TunnelType type) throws IOException {
+        String json = post("/api/check/" + type.name().toLowerCase(), null);
+        // 解析失败时后端返回 {"error":...}
+        if (json.contains("\"error\"")) {
+            throw new IOException(extractStringField(json, "error"));
+        }
+        return new UpdateCheck(
+                type,
+                extractStringField(json, "localVersion"),
+                extractStringField(json, "latestVersion"),
+                !"false".equals(extractStringField(json, "installed")),
+                "true".equals(extractStringField(json, "updateAvailable")));
+    }
+
+    /** 安装工具(默认选项) */
     public TunnelInfo install(TunnelType type) throws IOException {
-        String json = post("/api/install/" + type.name().toLowerCase(), null);
+        return install(type, InstallOptions.DEFAULT);
+    }
+
+    /**
+     * 安装工具.
+     * Windows 上的 ngrok 缺少 extractDir 时,后端返回 needsExtractDir,
+     * 此处转成 {@link ExtractDirRequiredException} 供 GUI 引导用户选目录.
+     */
+    public TunnelInfo install(TunnelType type, InstallOptions options) throws IOException {
+        StringBuilder body = new StringBuilder("{");
+        if (options.extractDir() != null) {
+            body.append("\"extractDir\":\"").append(
+                    options.extractDir().replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
+        }
+        if (options.force()) {
+            body.append(body.length() > 1 ? "," : "").append("\"force\":true");
+        }
+        body.append("}");
+        String json = post("/api/install/" + type.name().toLowerCase(),
+                body.length() > 2 ? body.toString() : null);
+        if (json.contains("\"needsExtractDir\":true")) {
+            throw new ExtractDirRequiredException();
+        }
+        if (json.contains("\"error\"")) {
+            throw new IOException(extractStringField(json, "error"));
+        }
+        return parseInfo(json);
+    }
+
+    /** 更新到最新版 */
+    public TunnelInfo update(TunnelType type) throws IOException {
+        String json = post("/api/update/" + type.name().toLowerCase(), null);
+        if (json.contains("\"needsExtractDir\":true")) {
+            throw new ExtractDirRequiredException();
+        }
+        if (json.contains("\"error\"")) {
+            throw new IOException(extractStringField(json, "error"));
+        }
+        return parseInfo(json);
+    }
+
+    /** 配置工具(如 ngrok authtoken) */
+    public TunnelInfo configure(TunnelType type, Map<String, String> config) throws IOException {
+        StringBuilder body = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> e : config.entrySet()) {
+            if (!first) body.append(",");
+            body.append("\"").append(e.getKey()).append("\":\"")
+                    .append(e.getValue() == null ? "" :
+                            e.getValue().replace("\\", "\\\\").replace("\"", "\\\""))
+                    .append("\"");
+            first = false;
+        }
+        body.append("}");
+        String json = post("/api/configure/" + type.name().toLowerCase(), body.toString());
+        if (json.contains("\"error\"")) {
+            throw new IOException(extractStringField(json, "error"));
+        }
         return parseInfo(json);
     }
 
@@ -61,6 +133,98 @@ public class TunnelClient {
         String json = post("/api/stop/" + type.name().toLowerCase(), null);
         return parseInfo(json);
     }
+
+    /** 启动后台守护进程(无需密码场景) */
+    public DaemonResult startDaemon(TunnelType type) throws IOException {
+        return daemonAction("/api/daemon-start/" + type.name().toLowerCase(), null);
+    }
+
+    /** 启动后台守护进程,附带 sudo 密码(仅本次传输,用后即弃) */
+    public DaemonResult startDaemon(TunnelType type, String sudoPassword) throws IOException {
+        return daemonAction("/api/daemon-start/" + type.name().toLowerCase(), sudoPassword);
+    }
+
+    /** 停止后台守护进程(无需密码场景) */
+    public DaemonResult stopDaemon(TunnelType type) throws IOException {
+        return daemonAction("/api/daemon-stop/" + type.name().toLowerCase(), null);
+    }
+
+    /** 停止后台守护进程,附带 sudo 密码(仅本次传输,用后即弃) */
+    public DaemonResult stopDaemon(TunnelType type, String sudoPassword) throws IOException {
+        return daemonAction("/api/daemon-stop/" + type.name().toLowerCase(), sudoPassword);
+    }
+
+    private DaemonResult daemonAction(String path, String sudoPassword) throws IOException {
+        String body = sudoPassword == null ? null
+                : "{\"sudoPassword\":" + jsonQuote(sudoPassword) + "}";
+        String json = post(path, body);
+        if (json.contains("\"needsSudoPassword\":true")) {
+            return DaemonResult.needPassword();
+        }
+        return DaemonResult.ok(parseInfo(json));
+    }
+
+    /** 极简 JSON 字符串转义(密码中可能含引号/反斜杠) */
+    private static String jsonQuote(String s) {
+        var sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.append('"').toString();
+    }
+
+    /** 保存并验证 Tailscale API 令牌 */
+    public String meshSaveToken(String apiToken) throws IOException {
+        return meshAction("token", "\"apiToken\":" + jsonQuote(apiToken));
+    }
+
+    /** 模式二:把本机分享给邮箱列表(逗号/分号/空白分隔) */
+    public String meshShare(String emails) throws IOException {
+        return meshAction("share", "\"emails\":" + jsonQuote(emails));
+    }
+
+    /** 模式三:邀请邮箱加入同一 tailnet */
+    public String meshInvite(String emails) throws IOException {
+        return meshAction("invite", "\"emails\":" + jsonQuote(emails));
+    }
+
+    /** 清除已保存的 API 令牌 */
+    public String meshClearToken() throws IOException {
+        return meshAction("clear-token", null);
+    }
+
+    private String meshAction(String action, String body) throws IOException {
+        String json = post("/api/mesh/tailscale/" + action,
+                body == null ? null : "{" + body + "}");
+        Matcher m = RESULT_FIELD.matcher(json);
+        if (m.find()) {
+            return m.group(1);
+        }
+        Matcher e = ERROR_FIELD.matcher(json);
+        if (e.find()) {
+            throw new IOException(e.group(1));
+        }
+        return json;
+    }
+
+    private static final java.util.regex.Pattern RESULT_FIELD =
+            java.util.regex.Pattern.compile("\"result\"\\s*:\\s*\"([^\"]*)\"");
+    private static final java.util.regex.Pattern ERROR_FIELD =
+            java.util.regex.Pattern.compile("\"error\"\\s*:\\s*\"([^\"]*)\"");
 
     /** 检测后端服务是否可达 */
     public boolean isReachable() {
@@ -88,9 +252,10 @@ public class TunnelClient {
     }
 
     private String post(String path, String jsonBody) throws IOException {
+        // 安装/更新需要下载大文件,超时放宽到 10 分钟
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(Duration.ofMinutes(10))
                 .header("Content-Type", "application/json");
         if (jsonBody != null) {
             builder.POST(HttpRequest.BodyPublishers.ofString(jsonBody));
@@ -158,6 +323,11 @@ public class TunnelClient {
         String publicUrl = null;
         long pid = -1;
         String error = null;
+        String localVersion = null;
+        String latestVersion = null;
+        boolean updateAvailable = false;
+        boolean needsAccount = false;
+        boolean daemonRunning = false;
 
         Matcher m = FIELD_PATTERN.matcher(json);
         while (m.find()) {
@@ -179,9 +349,27 @@ public class TunnelClient {
                     try { pid = Long.parseLong(val); } catch (Exception ignored) {}
                 }
                 case "error" -> error = strVal;
+                case "localVersion" -> localVersion = strVal;
+                case "latestVersion" -> latestVersion = strVal;
+                case "updateAvailable" -> updateAvailable = val.equals("true");
+                case "needsAccount" -> needsAccount = val.equals("true");
+                case "daemonRunning" -> daemonRunning = val.equals("true");
             }
         }
-        return new TunnelInfo(type, status, localPort, publicUrl, pid, error);
+        return new TunnelInfo(type, status, localPort, publicUrl, pid, error,
+                localVersion, latestVersion, updateAvailable, needsAccount, daemonRunning);
+    }
+
+    /** 从 JSON 中提取字符串字段(极简) */
+    private String extractStringField(String json, String field) {
+        Matcher m = FIELD_PATTERN.matcher(json);
+        while (m.find()) {
+            if (m.group(1).equals(field)) {
+                String val = m.group(2);
+                return val.equals("null") ? null : val.replace("\"", "");
+            }
+        }
+        return null;
     }
 
     private String toJsonArray(String[] arr) {

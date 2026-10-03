@@ -2,9 +2,18 @@
 # MC-Tunnel
 # ==============================
 
-# 运行时数据(数据库、下载的二进制)
-.mctunnel/
+# 运行时数据(数据库、下载的工具二进制)
+# 注意:必须用前导 / 锚定仓库根目录!否则 mctunnel/ 会误伤 Java 源码包目录 io/mctunnel/
+/.mctunnel/
+/mctunnel/
+
+# SQLite 数据库及其临时文件
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 
 # ==============================
 # Gradle
@@ -12,6 +21,9 @@
 build/
 .gradle/
 gradle-app.setting
+# 构建产物 jar 不进仓库(测试时可能把 mctunnel.jar 拷到根目录);
+# Gradle Wrapper 例外(上方 !gradle-wrapper.jar)
+*.jar
 !gradle-wrapper.jar
 
 # ==============================
@@ -69,4 +81,30 @@ desktop.ini
 *.tmp
 *.bak
 *.swp
+*.swo
 *~
+
+# ==============================
+# JVM 崩溃 / 运行诊断
+# ==============================
+hs_err_pid*
+replay_pid*
+
+# ==============================
+# Maven / 其它构建插件临时文件
+# ==============================
+dependency-reduced-pom.xml
+.flattened-pom.xml
+
+# ==============================
+# 本机私有配置(FCL/Android SDK 路径等,勿提交)
+# ==============================
+local.properties
+
+# ==============================
+# 打包/测试时散落在外的压缩包
+# ==============================
+*.zip
+*.tar
+*.tar.gz
+*.tgz

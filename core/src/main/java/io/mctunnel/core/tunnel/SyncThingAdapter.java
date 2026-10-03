@@ -3,9 +3,7 @@ package io.mctunnel.core.tunnel;
 import io.mctunnel.core.download.BinaryDownloader;
 import io.mctunnel.core.download.Platform;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -38,12 +36,21 @@ import java.util.regex.Pattern;
  */
 public class SyncThingAdapter implements TunnelTool {
 
-    private static final String VERSION = "1.28.0";
+    private static final String FALLBACK_VERSION = "1.28.0";
+
+    /** GitHub 最新 release API */
+    private static final String LATEST_API =
+            "https://api.github.com/repos/syncthing/syncthing/releases/latest";
+
     private static final Pattern DEVICE_ID_PATTERN =
             Pattern.compile("\"myID\"\\s*:\\s*\"([^\"]+)\"");
 
+    private static final Pattern TAG_NAME_PATTERN =
+            Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
+
     private final BinaryDownloader downloader;
     private final Platform platform;
+    private ToolConfigStore configStore = ToolConfigStore.inMemory();
 
     private Path binaryPath;
     private Process process;
@@ -52,6 +59,11 @@ public class SyncThingAdapter implements TunnelTool {
     private String folderPath;
     private String peerDevices;
     private TunnelStatus status = TunnelStatus.NOT_INSTALLED;
+
+    /** 会话内缓存:本地/远程版本与 release 资产直链,null=未探测 */
+    private String cachedLocalVersion;
+    private String cachedLatestVersion;
+    private String cachedAssetUrl;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -70,11 +82,46 @@ public class SyncThingAdapter implements TunnelTool {
         }
     }
 
+    /** 绑定持久化配置存储(记录安装路径),绑定后重新解析 */
+    public void setConfigStore(ToolConfigStore store) {
+        this.configStore = store != null ? store : ToolConfigStore.inMemory();
+        resolveBinaryPath();
+    }
+
+    /** 使用用户已有的 syncthing(指定可执行文件或其所在目录) */
+    @Override
+    public void setBinaryPath(Path path) throws IOException {
+        Path bin = Binaries.resolveExecutable(path,
+                TunnelType.SYNCTHING.getBinaryName() + platform.getExecutableSuffix());
+        this.binaryPath = bin;
+        configStore.put("syncthing", "binaryPath", bin.toString());
+        cachedLocalVersion = Binaries.detectVersion(bin);
+        if (status == TunnelStatus.NOT_INSTALLED) {
+            status = TunnelStatus.STOPPED;
+        }
+    }
+
     private void resolveBinaryPath() {
         String name = TunnelType.SYNCTHING.getBinaryName() + platform.getExecutableSuffix();
-        this.binaryPath = Paths.get(System.getProperty("user.home"),
-                ".mctunnel", "binaries", "syncthing",
-                platform.name().toLowerCase(), name);
+        // 1. 先扫系统 PATH(包管理器/用户自行安装;模组首装时数据库为空,这是首要来源)
+        String onPath = io.mctunnel.core.util.PathManager.findOnPath(name);
+        if (onPath != null && Files.isExecutable(Path.of(onPath))) {
+            this.binaryPath = Path.of(onPath);
+            configStore.put("syncthing", "binaryPath", onPath);
+            return;
+        }
+        // 2. 记录的安装路径(模组安装/用户指定位置后才有)
+        String recorded = configStore.get("syncthing", "binaryPath");
+        if (recorded != null && !recorded.isBlank()
+                && Files.isExecutable(Path.of(recorded))) {
+            this.binaryPath = Path.of(recorded);
+            return;
+        }
+        // 3. 默认缓存目录
+        this.binaryPath = io.mctunnel.core.DataDir.binaries()
+                .resolve("syncthing")
+                .resolve(platform.name().toLowerCase())
+                .resolve(name);
     }
 
     @Override
@@ -84,32 +131,76 @@ public class SyncThingAdapter implements TunnelTool {
 
     @Override
     public boolean isInstalled() {
-        return Files.isExecutable(binaryPath);
+        return binaryPath != null && Files.isExecutable(binaryPath);
     }
 
+    // ── 检查更新 ──────────────────────────────────────────
+
     @Override
-    public void install() throws IOException {
-        if (isInstalled()) return;
+    public UpdateCheck checkUpdate() throws IOException {
+        // 官方 GitHub Releases API
+        String json = io.mctunnel.core.download.HttpText.get(LATEST_API);
+        Matcher tag = TAG_NAME_PATTERN.matcher(json);
+        if (!tag.find()) {
+            throw new IOException("Cannot parse syncthing latest release tag");
+        }
+        cachedLatestVersion = tag.group(1);
+        cachedAssetUrl = findAssetUrl(json, cachedLatestVersion);
+        cachedLocalVersion = Binaries.detectVersion(binaryPath);
+        return UpdateCheck.of(TunnelType.SYNCTHING, cachedLocalVersion, cachedLatestVersion);
+    }
+
+    /** 从 release JSON 中找当前平台的资产下载地址(避免资产命名变化导致 404) */
+    private String findAssetUrl(String json, String version) {
+        String assetName;
+        if (platform == Platform.MACOS_ARM64 || platform == Platform.MACOS_X64) {
+            assetName = "syncthing-macos-" + platform.getArch() + "-v" + version + ".tar.gz";
+        } else if (platform == Platform.WINDOWS_X64) {
+            assetName = "syncthing-windows-" + platform.getArch() + "-v" + version + ".zip";
+        } else {
+            assetName = "syncthing-" + platform.getOsName() + "-" + platform.getArch()
+                    + "-v" + version + ".tar.gz";
+        }
+        Matcher m = Pattern.compile("(https://[^\"]+" + Pattern.quote(assetName) + ")")
+                .matcher(json);
+        return m.find() ? m.group(1) : null;
+    }
+
+    // ── 安装 / 更新 ───────────────────────────────────────
+
+    @Override
+    public void install(InstallOptions options) throws IOException {
+        if (isInstalled() && !options.force()) {
+            return;
+        }
         String url = getDownloadUrl();
-        downloader.downloadAndExtract("syncthing", url, platform);
+        Path dir = downloader.downloadAndExtract("syncthing", url, platform);
         // 解压后可能在子目录 syncthing-<version>-<os>-<arch>/
-        relocateBinary();
+        relocateFrom(dir, options.force());
+        cachedLocalVersion = Binaries.detectVersion(binaryPath);
         if (!isInstalled()) {
             throw new IOException("syncthing binary not found after install at " + binaryPath);
         }
+        configStore.put("syncthing", "binaryPath", binaryPath.toString());
         status = TunnelStatus.STOPPED;
     }
 
-    private void relocateBinary() {
-        // 直接路径不存在时,找子目录里的 syncthing
-        if (Files.isExecutable(binaryPath)) return;
-        Path toolDir = binaryPath.getParent();
-        try (var stream = Files.walk(toolDir, 3)) {
+    /**
+     * 把解压出的 syncthing 二进制归位到 binaryPath.
+     * force 时(更新)必须覆盖旧版本;查找时排除 binaryPath 自身,
+     * 避免把旧版本二进制又"归位"一遍.
+     */
+    private void relocateFrom(Path root, boolean force) {
+        if (!force && Files.isExecutable(binaryPath)) {
+            return;
+        }
+        try (var stream = Files.walk(root, 3)) {
             Path found = stream.filter(p -> p.getFileName() != null
                             && p.getFileName().toString().equals(
-                                    "syncthing" + platform.getExecutableSuffix()))
+                            "syncthing" + platform.getExecutableSuffix())
+                            && !p.equals(binaryPath))
                     .findFirst().orElse(null);
-            if (found != null && !found.equals(binaryPath)) {
+            if (found != null) {
                 Files.move(found, binaryPath,
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 binaryPath.toFile().setExecutable(true, false);
@@ -118,19 +209,23 @@ public class SyncThingAdapter implements TunnelTool {
         }
     }
 
-    private String getDownloadUrl() throws IOException {
+    private String getDownloadUrl() {
+        // 优先使用检查更新解析出的资产直链
+        if (cachedAssetUrl != null) {
+            return cachedAssetUrl;
+        }
         String os = platform.getOsName();
         String arch = platform.getArch();
         if (platform == Platform.WINDOWS_X64) {
             return "https://github.com/syncthing/syncthing/releases/download/v"
-                    + VERSION + "/syncthing-windows-amd64-v" + VERSION + ".zip";
+                    + FALLBACK_VERSION + "/syncthing-windows-amd64-v" + FALLBACK_VERSION + ".zip";
         }
         if (platform == Platform.MACOS_ARM64 || platform == Platform.MACOS_X64) {
             return "https://github.com/syncthing/syncthing/releases/download/v"
-                    + VERSION + "/syncthing-macos-" + arch + "-v" + VERSION + ".tar.gz";
+                    + FALLBACK_VERSION + "/syncthing-macos-" + arch + "-v" + FALLBACK_VERSION + ".tar.gz";
         }
         return "https://github.com/syncthing/syncthing/releases/download/v"
-                + VERSION + "/syncthing-" + os + "-" + arch + "-v" + VERSION + ".tar.gz";
+                + FALLBACK_VERSION + "/syncthing-" + os + "-" + arch + "-v" + FALLBACK_VERSION + ".tar.gz";
     }
 
     @Override
@@ -326,7 +421,7 @@ public class SyncThingAdapter implements TunnelTool {
     @Override
     public TunnelInfo getInfo() {
         TunnelStatus s = getStatus();
-        return switch (s) {
+        TunnelInfo base = switch (s) {
             case NOT_INSTALLED -> TunnelInfo.notInstalled(TunnelType.SYNCTHING);
             case STOPPED -> TunnelInfo.stopped(TunnelType.SYNCTHING);
             case RUNNING -> {
@@ -337,6 +432,10 @@ public class SyncThingAdapter implements TunnelTool {
             }
             case ERROR -> TunnelInfo.error(TunnelType.SYNCTHING, "syncthing process error");
         };
+        String local = s == TunnelStatus.NOT_INSTALLED ? null
+                : (cachedLocalVersion != null ? cachedLocalVersion
+                : (cachedLocalVersion = Binaries.detectVersion(binaryPath)));
+        return base.withVersionInfo(local, cachedLatestVersion, false);
     }
 
     public Path getBinaryPath() {
