@@ -37,7 +37,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class RelayServer {
 
     /** 默认中继端口 */
-    public static final int DEFAULT_PORT = 18787;
+    public static final int DEFAULT_PORT = 8721;
 
     private final int port;
     private final String publicHost;

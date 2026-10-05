@@ -8,7 +8,7 @@ import java.net.URISyntaxException;
  * <p>
  * 链接格式: {@code mctunnel://<relayHost>:<relayPort>/<roomId>}
  * <p>
- * 示例: {@code mctunnel://59.110.163.88:18787/abc123}
+ * 示例: {@code mctunnel://59.110.163.88:8721/abc123}
  */
 public final class LinkCodec {
 
