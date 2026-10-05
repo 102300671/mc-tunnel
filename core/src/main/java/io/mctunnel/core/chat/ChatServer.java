@@ -131,11 +131,14 @@ public class ChatServer {
      * 发送一条消息(从本节点发出),广播给所有本地客户端,持久化,并中继到对等节点.
      */
     public void broadcast(String sender, String content) {
-        ChatMessage msg = ChatMessage.create(nodeId, sender, content);
+        broadcast(null, sender, content);
+    }
+
+    /** 房间作用域广播:消息携带 roomId,存储按房间分区 */
+    public void broadcast(String roomId, String sender, String content) {
+        ChatMessage msg = ChatMessage.create(nodeId, sender, content, roomId);
         deliverLocal(msg);
-        // 持久化
         if (storage != null) storage.saveMessage(msg);
-        // 中继到对等节点
         if (mesh != null) mesh.relay(msg);
     }
 
@@ -225,22 +228,23 @@ public class ChatServer {
                     // 客户端可能发 JSON {sender, content} 或纯文本
                     String sender = "client";
                     String content = text;
+                    String roomId = "";
                     String trimmed = text.trim();
                     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
                         try {
                             String s = extractJson(trimmed, "sender");
                             String c = extractJson(trimmed, "content");
+                            String r = extractJson(trimmed, "roomId");
                             if (c != null) {
                                 content = c;
                                 if (s != null) sender = s;
+                                if (r != null) roomId = r;
                             }
                         } catch (Exception ignored) {
                         }
                     }
-                    ChatMessage msg = ChatMessage.create(nodeId, sender, content);
-                    // 本地广播给所有客户端
+                    ChatMessage msg = ChatMessage.create(nodeId, sender, content, roomId);
                     deliverLocal(msg);
-                    // 持久化 + 中继到对等节点
                     if (storage != null) storage.saveMessage(msg);
                     if (mesh != null) mesh.relay(msg);
                 }
@@ -292,7 +296,7 @@ public class ChatServer {
                 + "\"nodeId\":\"" + esc(m.nodeId()) + "\","
                 + "\"sender\":\"" + esc(m.sender()) + "\","
                 + "\"content\":\"" + esc(m.content()) + "\","
-                + "\"timestamp\":" + m.timestamp() + "}";
+                + "\"timestamp\":" + m.timestamp() + "," + "\"roomId\":\"" + esc(m.roomId()) + "\"}";
     }
 
     private static String esc(String s) {

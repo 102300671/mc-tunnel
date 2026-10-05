@@ -1,5 +1,11 @@
 package io.mctunnel.forge.controller;
 
+import io.mctunnel.core.room.NetworkStatus;
+import io.mctunnel.core.room.NetworkType;
+import io.mctunnel.core.room.Room;
+import io.mctunnel.core.room.RoomManager;
+import io.mctunnel.core.room.RoomMember;
+import io.mctunnel.core.room.RoomNetwork;
 import io.mctunnel.core.tunnel.DaemonResult;
 import io.mctunnel.core.tunnel.InstallOptions;
 import io.mctunnel.core.tunnel.SudoPasswordRequiredException;
@@ -13,6 +19,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 内嵌模式控制器:直接调用 core 层工具适配器.
@@ -22,9 +29,15 @@ import java.util.Map;
 public class EmbeddedToolController implements ToolController {
 
     private final Map<TunnelType, TunnelTool> tools;
+    private final RoomManager roomManager;
 
     public EmbeddedToolController(Map<TunnelType, TunnelTool> tools) {
+        this(tools, null);
+    }
+
+    public EmbeddedToolController(Map<TunnelType, TunnelTool> tools, RoomManager roomManager) {
         this.tools = tools;
+        this.roomManager = roomManager;
     }
 
     @Override
@@ -139,6 +152,112 @@ public class EmbeddedToolController implements ToolController {
     public String meshClearToken() throws IOException {
         tailscale().clearApiToken();
         return "令牌已清除";
+    }
+
+    // ── 房间 & 网络 ──
+
+    @Override
+    public String roomCreate(String name) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        String relayHost = System.getenv().getOrDefault("MCTUNNEL_RELAY_HOST", "59.110.163.88");
+        int relayPort = Integer.parseInt(System.getenv().getOrDefault("MCTUNNEL_RELAY_PORT", "8721"));
+        return roomManager.createRoom(relayHost, relayPort, name);
+    }
+
+    @Override
+    public String roomJoin(String link) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        roomManager.joinRoom(link);
+        Room r = roomManager.getCurrentRoom();
+        if (r == null) return "{}";
+        return "{\"roomId\":\"" + esc(r.id())
+                + "\",\"name\":\"" + esc(r.name())
+                + "\",\"members\":" + roomManager.getMembers().size() + "}";
+    }
+
+    @Override
+    public void roomLeave() throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        roomManager.leaveRoom();
+    }
+
+    @Override
+    public String roomCurrent() throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        Room r = roomManager.getCurrentRoom();
+        if (r == null) return "{\"room\":null}";
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"room\":{\"id\":\"").append(esc(r.id()))
+          .append("\",\"name\":\"").append(esc(r.name()))
+          .append("\",\"hostNodeId\":\"").append(esc(r.hostNodeId()))
+          .append("\"},\"members\":[");
+        boolean first = true;
+        for (RoomMember m : roomManager.getMembers()) {
+            if (!first) sb.append(",");
+            sb.append("{\"nodeId\":\"").append(esc(m.nodeId()))
+              .append("\",\"displayName\":\"").append(esc(m.displayName())).append("\"}");
+            first = false;
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    @Override
+    public String networkList() throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        if (roomManager.getCurrentRoom() == null) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (RoomNetwork n : roomManager.getNetworks()) {
+            if (!first) sb.append(",");
+            sb.append("{\"id\":\"").append(esc(n.id()))
+              .append("\",\"type\":\"").append(esc(n.type().name()))
+              .append("\",\"status\":\"").append(esc(n.status().name()))
+              .append("\",\"endpoint\":")
+              .append(n.endpoint() == null ? "null" : "\"" + esc(n.endpoint()) + "\"")
+              .append("}");
+            first = false;
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    @Override
+    public String networkCreate(String type, String name) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        if (roomManager.getCurrentRoom() == null) {
+            throw new IOException("请先加入或创建房间");
+        }
+        NetworkType nt = "virtual".equalsIgnoreCase(type)
+                ? NetworkType.VIRTUAL
+                : NetworkType.NAT_TRAVERSAL;
+        String netId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        RoomNetwork net = new RoomNetwork(netId, roomManager.getCurrentRoom().id(), nt,
+                NetworkStatus.CREATED, null,
+                roomManager.getCurrentRoom().hostNodeId(), System.currentTimeMillis());
+        roomManager.registerNetwork(net);
+        return "{\"id\":\"" + esc(net.id()) + "\",\"type\":\"" + esc(nt.name()) + "\"}";
+    }
+
+    /** JSON 字符串转义 */
+    private static String esc(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+                }
+            }
+        }
+        return sb.toString();
     }
 
     private io.mctunnel.core.tunnel.TailscaleAdapter tailscale()

@@ -62,6 +62,10 @@ public class TunnelScreen extends Screen {
             y += 55;
         }
 
+        // 房间管理入口(返回按钮上方)
+        addRenderableWidget(Button.builder(Component.literal("房间管理"), b -> openRoomScreen())
+                .bounds(cx - 50, this.height - 60, 100, 20).build());
+
         // 返回
         addRenderableWidget(Button.builder(Component.literal("返回"), b -> onClose())
                 .bounds(cx - 50, this.height - 35, 100, 20).build());
@@ -400,6 +404,16 @@ public class TunnelScreen extends Screen {
         }
         int port = MCTunnelMod.getWebUiPort();
         return "http://localhost:" + (port > 0 ? port : 8787);
+    }
+
+    /** 打开房间/网络管理屏 */
+    private void openRoomScreen() {
+        ToolController controller = MCTunnelMod.getToolController();
+        if (controller == null) {
+            showMessage("控制器未初始化");
+            return;
+        }
+        this.minecraft.setScreen(new RoomScreen(this, controller));
     }
 
     private void showMessage(String msg) {

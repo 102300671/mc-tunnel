@@ -2,6 +2,11 @@ package io.mctunnel.core.web;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import io.mctunnel.core.chat.ChatMessage;
+import io.mctunnel.core.room.Room;
+import io.mctunnel.core.room.RoomManager;
+import io.mctunnel.core.room.RoomMember;
+import io.mctunnel.core.room.RoomNetwork;
 import io.mctunnel.core.tunnel.ExtractDirRequiredException;
 import io.mctunnel.core.tunnel.InstallOptions;
 import io.mctunnel.core.tunnel.SudoPasswordRequiredException;
@@ -41,9 +46,16 @@ class ApiHandler implements HttpHandler {
     static final String NGROK_SIGNUP_URL = "https://dashboard.ngrok.org/signup";
 
     private final Map<TunnelType, TunnelTool> tools;
+    private final RoomManager roomManager;
 
-    ApiHandler(Map<TunnelType, TunnelTool> tools) {
+    ApiHandler(Map<TunnelType, TunnelTool> tools, RoomManager roomManager) {
         this.tools = tools;
+        this.roomManager = roomManager;
+    }
+
+    /** 兼容旧构造(无房间管理) */
+    ApiHandler(Map<TunnelType, TunnelTool> tools) {
+        this(tools, null);
     }
 
     @Override
@@ -83,6 +95,22 @@ class ApiHandler implements HttpHandler {
             } else if ("POST".equalsIgnoreCase(method)
                     && path.startsWith("/api/mesh/tailscale/")) {
                 handleMesh(exchange, path);
+            } else if ("GET".equalsIgnoreCase(method) && path.equals("/api/rooms/current")) {
+                handleGetCurrentRoom(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/create")) {
+                handleCreateRoom(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/join")) {
+                handleJoinRoom(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/leave")) {
+                handleLeaveRoom(exchange);
+            } else if ("GET".equalsIgnoreCase(method) && path.equals("/api/rooms/networks")) {
+                handleListNetworks(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/networks")) {
+                handleCreateNetwork(exchange);
+            } else if ("GET".equalsIgnoreCase(method) && path.equals("/api/rooms/messages")) {
+                handleGetMessages(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/chat")) {
+                handleSendChat(exchange);
             } else {
                 WebServer.sendResponse(exchange, 404,
                         "{\"error\":\"Not found: " + path + "\"}");
@@ -283,6 +311,173 @@ class ApiHandler implements HttpHandler {
         }
     }
 
+    // ── 房间 & 网络端点 ──────────────────────────────────
+
+    private void handleGetCurrentRoom(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 200, "{\"room\":null}");
+            return;
+        }
+        Room r = roomManager.getCurrentRoom();
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"room\":{\"id\":\"").append(esc(r.id()))
+          .append("\",\"name\":\"").append(esc(r.name()))
+          .append("\",\"hostNodeId\":\"").append(esc(r.hostNodeId()))
+          .append("\"},\"members\":[");
+        boolean first = true;
+        for (RoomMember m : roomManager.getMembers()) {
+            if (!first) sb.append(",");
+            sb.append("{\"nodeId\":\"").append(esc(m.nodeId()))
+              .append("\",\"displayName\":\"").append(esc(m.displayName())).append("\"}");
+            first = false;
+        }
+        sb.append("]}");
+        WebServer.sendResponse(exchange, 200, sb.toString());
+    }
+
+    private void handleCreateRoom(HttpExchange exchange) throws IOException {
+        if (roomManager == null) {
+            WebServer.sendResponse(exchange, 503, "{\"error\":\"房间管理器未初始化\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String name = extractStringField(body, "name");
+        if (name == null || name.isBlank()) name = "MC-Tunnel 房间";
+        String relayHost = extractStringField(body, "relayHost");
+        if (relayHost == null || relayHost.isBlank())
+            relayHost = System.getenv().getOrDefault("MCTUNNEL_RELAY_HOST", "59.110.163.88");
+        String relayPortStr = extractStringField(body, "relayPort");
+        int relayPort = 8721;
+        if (relayPortStr != null && !relayPortStr.isBlank())
+            relayPort = Integer.parseInt(relayPortStr);
+        try {
+            String link = roomManager.createRoom(relayHost, relayPort, name);
+            Room r = roomManager.getCurrentRoom();
+            WebServer.sendResponse(exchange, 200,
+                    "{\"link\":\"" + esc(link) + "\",\"roomId\":\"" + esc(r.id()) + "\"}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
+    private void handleJoinRoom(HttpExchange exchange) throws IOException {
+        if (roomManager == null) {
+            WebServer.sendResponse(exchange, 503, "{\"error\":\"房间管理器未初始化\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String link = extractStringField(body, "link");
+        if (link == null || link.isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"缺少 link 参数\"}");
+            return;
+        }
+        try {
+            roomManager.joinRoom(link);
+            Room r = roomManager.getCurrentRoom();
+            WebServer.sendResponse(exchange, 200,
+                    "{\"roomId\":\"" + esc(r.id()) + "\",\"name\":\"" + esc(r.name())
+                    + "\",\"members\":" + roomManager.getMembers().size() + "}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
+    private void handleLeaveRoom(HttpExchange exchange) throws IOException {
+        if (roomManager == null) {
+            WebServer.sendResponse(exchange, 200, "{\"result\":\"not_in_room\"}");
+            return;
+        }
+        try {
+            roomManager.leaveRoom();
+            WebServer.sendResponse(exchange, 200, "{\"result\":\"left\"}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
+    private void handleListNetworks(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 200, "[]");
+            return;
+        }
+        var nets = roomManager.getNetworks();
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (RoomNetwork n : nets) {
+            if (!first) sb.append(",");
+            sb.append("{\"id\":\"").append(esc(n.id()))
+              .append("\",\"type\":\"").append(esc(n.type().name()))
+              .append("\",\"status\":\"").append(esc(n.status().name()))
+              .append("\",\"endpoint\":").append(n.endpoint() == null ? "null" : "\"" + esc(n.endpoint()) + "\"")
+              .append(",\"hostNodeId\":\"").append(esc(n.hostNodeId())).append("\"}");
+            first = false;
+        }
+        sb.append("]");
+        WebServer.sendResponse(exchange, 200, sb.toString());
+    }
+
+    private void handleCreateNetwork(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"请先加入或创建房间\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String type = extractStringField(body, "type");
+        String name = extractStringField(body, "name");
+        if (name == null) name = "network";
+        // 仅记录到存储,不自动启动底层工具
+        io.mctunnel.core.room.NetworkType nt = "virtual".equalsIgnoreCase(type)
+                ? io.mctunnel.core.room.NetworkType.VIRTUAL
+                : io.mctunnel.core.room.NetworkType.NAT_TRAVERSAL;
+        String netId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        RoomNetwork net = new RoomNetwork(netId, roomManager.getCurrentRoom().id(), nt,
+                io.mctunnel.core.room.NetworkStatus.CREATED, null,
+                roomManager.getCurrentRoom().hostNodeId(), System.currentTimeMillis());
+        roomManager.registerNetwork(net);
+        WebServer.sendResponse(exchange, 200,
+                "{\"id\":\"" + esc(net.id()) + "\",\"type\":\"" + esc(nt.name()) + "\"}");
+    }
+
+    private void handleGetMessages(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 200, "[]");
+            return;
+        }
+        var msgs = roomManager.loadChatHistory(100);
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (ChatMessage m : msgs) {
+            if (!first) sb.append(",");
+            sb.append("{\"id\":\"").append(esc(m.id()))
+              .append("\",\"sender\":\"").append(esc(m.sender()))
+              .append("\",\"content\":\"").append(esc(m.content()))
+              .append("\",\"timestamp\":").append(m.timestamp()).append("}");
+            first = false;
+        }
+        sb.append("]");
+        WebServer.sendResponse(exchange, 200, sb.toString());
+    }
+
+    private void handleSendChat(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"未加入房间\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String sender = extractStringField(body, "sender");
+        String content = extractStringField(body, "content");
+        if (content == null || content.isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"消息不能为空\"}");
+            return;
+        }
+        try {
+            roomManager.sendChat(sender == null ? "anonymous" : sender, content);
+            WebServer.sendResponse(exchange, 200, "{\"result\":\"sent\"}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
     private TunnelTool resolveTool(String path, String prefix) {
         String name = path.substring(prefix.length()).toUpperCase();
         try {
@@ -387,4 +582,7 @@ class ApiHandler implements HttpHandler {
                 .replace("\n", "\\n")
                 .replace("\r", "\\r");
     }
+
+    /** escape 的短别名 */
+    private String esc(String s) { return escape(s); }
 }

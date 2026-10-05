@@ -4,6 +4,12 @@ import io.mctunnel.core.DataDir;
 import io.mctunnel.core.TunnelCore;
 import io.mctunnel.core.chat.ChatServer;
 import io.mctunnel.core.chat.MeshManager;
+import io.mctunnel.core.network.NatTraversalNetwork;
+import io.mctunnel.core.network.Network;
+import io.mctunnel.core.network.VirtualNetwork;
+import io.mctunnel.core.room.NetworkType;
+import io.mctunnel.core.room.RoomManager;
+import io.mctunnel.core.room.RoomNetwork;
 import io.mctunnel.core.storage.ChatStorage;
 import io.mctunnel.core.tunnel.NgrokAdapter;
 import io.mctunnel.core.tunnel.SyncThingAdapter;
@@ -40,6 +46,15 @@ import java.util.UUID;
 public final class Main {
 
     private static Map<TunnelType, TunnelTool> tools;
+    private static ChatStorage storage;
+    private static RoomManager roomManager;
+    private static String nodeId;
+
+    /** 默认云中继主机(初始网络主机),可通过环境变量覆盖 */
+    private static final String DEFAULT_RELAY_HOST =
+            System.getenv().getOrDefault("MCTUNNEL_RELAY_HOST", "59.110.163.88");
+    private static final int DEFAULT_RELAY_PORT =
+            Integer.parseInt(System.getenv().getOrDefault("MCTUNNEL_RELAY_PORT", "8721"));
 
     private Main() {
     }
@@ -74,6 +89,8 @@ public final class Main {
                 case "stop" -> cmdStop(rest);
                 case "status" -> cmdStatus();
                 case "serve" -> cmdServe();
+                case "room" -> cmdRoom(rest);
+                case "network" -> cmdNetwork(rest);
                 case "help" -> printHelp();
                 default -> {
                     System.err.println("Unknown command: " + command);
@@ -159,7 +176,9 @@ public final class Main {
     }
 
     private static void initTools() {
-        ChatStorage storage = new ChatStorage();
+        storage = new ChatStorage();
+        nodeId = System.getenv().getOrDefault("MCTUNNEL_NODE_ID",
+                "node-" + UUID.randomUUID().toString().substring(0, 8));
         // EnumMap:遍历顺序固定为枚举声明顺序(ngrok→tailscale→syncthing),
         // 否则 HashMap 乱序会让 GUI 状态行与按钮行错位(组网按钮被看成挂在 ngrok 行)
         tools = new java.util.EnumMap<>(TunnelType.class);
@@ -720,15 +739,13 @@ public final class Main {
     }
 
     private static void cmdServe() throws IOException, InterruptedException {
-        String nodeId = System.getenv().getOrDefault("MCTUNNEL_NODE_ID",
-                "node-" + UUID.randomUUID().toString().substring(0, 8));
-
-        // 存储(SQLite 或内存回退)
-        ChatStorage storage = new ChatStorage();
-        // 组网管理器
+        // 复用 initTools 中初始化的 nodeId / storage
         MeshManager mesh = new MeshManager(nodeId);
+        // 房间管理器(初始网络主机)
+        RoomManager rm = new RoomManager(nodeId, System.getProperty("user.name"), storage);
+        rm.loadLastRoom();
 
-        WebServer web = new WebServer(tools);
+        WebServer web = new WebServer(tools, rm);
         web.start();
         ChatServer chat = new ChatServer(nodeId, storage, mesh);
         chat.start();
@@ -791,6 +808,106 @@ public final class Main {
         return tool;
     }
 
+    // ── 房间 & 网络命令 ────────────────────────────────────
+
+    private static void cmdRoom(String[] args) throws IOException {
+        if (args.length == 0) {
+            System.out.println("Usage: room <create|join|leave|list> [args...]");
+            return;
+        }
+        String sub = args[0].toLowerCase();
+        switch (sub) {
+            case "create" -> {
+                String name = args.length > 1 ? args[1] : "MC-Tunnel 房间";
+                ensureRoomManager();
+                String link = roomManager.createRoom(DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, name);
+                System.out.println("房间已创建: " + name);
+                System.out.println("加入链接(发给成员): " + link);
+            }
+            case "join" -> {
+                if (args.length < 2) {
+                    System.err.println("Usage: room join <link>");
+                    return;
+                }
+                ensureRoomManager();
+                roomManager.joinRoom(args[1]);
+                System.out.println("已加入房间: " + roomManager.getCurrentRoom().name());
+                System.out.println("成员: " + roomManager.getMembers().size());
+            }
+            case "leave" -> {
+                if (roomManager != null) roomManager.leaveRoom();
+                System.out.println("已离开房间");
+            }
+            case "list" -> {
+                if (roomManager == null || roomManager.getCurrentRoom() == null) {
+                    System.out.println("当前未加入任何房间");
+                    return;
+                }
+                var r = roomManager.getCurrentRoom();
+                System.out.println("房间: " + r.name() + " (id=" + r.id() + ")");
+                System.out.println("成员:");
+                for (var m : roomManager.getMembers()) {
+                    System.out.println("  - " + m.displayName() + " (" + m.nodeId() + ")");
+                }
+            }
+            default -> System.err.println("Unknown room subcommand: " + sub);
+        }
+    }
+
+    private static void cmdNetwork(String[] args) throws IOException {
+        ensureRoomManager();
+        if (roomManager.getCurrentRoom() == null) {
+            System.err.println("请先加入或创建房间");
+            return;
+        }
+        if (args.length == 0) {
+            System.out.println("Usage: network <create|list> [args...]");
+            return;
+        }
+        String sub = args[0].toLowerCase();
+        switch (sub) {
+            case "create" -> {
+                if (args.length < 3) {
+                    System.err.println("Usage: network create <nat|virtual> <name>");
+                    return;
+                }
+                NetworkType type = "virtual".equalsIgnoreCase(args[1])
+                        ? NetworkType.VIRTUAL : NetworkType.NAT_TRAVERSAL;
+                String name = args[2];
+                Network net;
+                if (type == NetworkType.NAT_TRAVERSAL) {
+                    net = new NatTraversalNetwork((NgrokAdapter) tools.get(TunnelType.NGROK));
+                } else {
+                    net = new VirtualNetwork((TailscaleAdapter) tools.get(TunnelType.TAILSCALE));
+                }
+                RoomNetwork data = net.create(roomManager.getCurrentRoom(), name);
+                roomManager.registerNetwork(data);
+                System.out.println("网络已创建: " + name + " (" + type + ", id=" + data.id() + ")");
+                System.out.println("如需启动: 调用 network start " + data.id());
+            }
+            case "list" -> {
+                var nets = roomManager.getNetworks();
+                if (nets.isEmpty()) {
+                    System.out.println("当前房间暂无网络");
+                    return;
+                }
+                for (RoomNetwork n : nets) {
+                    System.out.println("  - " + n.id() + " [" + n.type() + "/" + n.status()
+                            + "] endpoint=" + (n.endpoint() == null ? "-" : n.endpoint()));
+                }
+            }
+            default -> System.err.println("Unknown network subcommand: " + sub);
+        }
+    }
+
+    private static void ensureRoomManager() {
+        if (roomManager == null) {
+            roomManager = new RoomManager(nodeId, System.getProperty("user.name"), storage);
+            // 从存储恢复上次加入的房间(不重连中继,仅恢复上下文)
+            roomManager.loadLastRoom();
+        }
+    }
+
     private static void printHelp() {
         System.out.println("""
                 MC-Tunnel CLI
@@ -809,6 +926,16 @@ public final class Main {
                   stop <tool>             Stop a running tool
                   status                  Show status of all tools
                   serve                   Start the WebUI dashboard
+                  room <create|join|leave|list> [args]
+                                          Manage rooms (cloud relay: 59.110.163.88:8721)
+                                            room create [name]       Create a room, print join link
+                                            room join <link>         Join a room via link
+                                            room leave               Leave current room
+                                            room list                 Show current room & members
+                  network <create|list> [args]
+                                          Manage networks in the current room
+                                            network create <nat|virtual> <name>
+                                            network list
                   help                    Show this help
                 Tools: ngrok, tailscale, syncthing""");
     }

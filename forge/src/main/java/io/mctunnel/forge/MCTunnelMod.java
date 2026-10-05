@@ -4,6 +4,7 @@ import io.mctunnel.core.TunnelCore;
 import io.mctunnel.core.DataDir;
 import io.mctunnel.core.chat.ChatServer;
 import io.mctunnel.core.chat.MeshManager;
+import io.mctunnel.core.room.RoomManager;
 import io.mctunnel.core.storage.ChatStorage;
 import io.mctunnel.core.tunnel.NgrokAdapter;
 import io.mctunnel.core.tunnel.SyncThingAdapter;
@@ -56,6 +57,8 @@ public class MCTunnelMod {
     private static ChatServer chatServer;
     private static ChatStorage chatStorage;
     private static MeshManager meshManager;
+    /** 房间管理器(内嵌模式) */
+    private static RoomManager roomManager;
     /** 内嵌模式的工具实例 */
     private static Map<TunnelType, TunnelTool> tools;
     /** 工具控制器(内嵌直连 或 远程 HTTP) */
@@ -100,12 +103,18 @@ public class MCTunnelMod {
             chatStorage = new ChatStorage();
             tools = createTools();
             startChatServerIfNeeded();
+            // 房间管理器(初始网络主机)
+            String nodeId = System.getenv().getOrDefault("MCTUNNEL_NODE_ID",
+                    "node-" + java.util.UUID.randomUUID().toString().substring(0, 8));
+            roomManager = new RoomManager(nodeId,
+                    System.getProperty("user.name"), chatStorage);
+            roomManager.loadLastRoom();
             if (MCTunnelConfig.isWebUiEnabled()) {
                 startWebUi();
             } else {
                 LOGGER.info("[MC-Tunnel] WebUI disabled by config, skipping.");
             }
-            toolController = new EmbeddedToolController(tools);
+            toolController = new EmbeddedToolController(tools, roomManager);
         } else {
             // Android 端: 后端需手动在 Termux 起 serve,模组只做客户端
             LOGGER.info("[MC-Tunnel] Android environment detected, using external backend at {}", backendUrl);

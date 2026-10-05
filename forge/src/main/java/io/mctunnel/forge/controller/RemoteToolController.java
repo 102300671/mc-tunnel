@@ -8,6 +8,12 @@ import io.mctunnel.core.tunnel.TunnelType;
 import io.mctunnel.core.tunnel.UpdateCheck;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -17,6 +23,8 @@ import java.util.Map;
 public class RemoteToolController implements ToolController {
 
     private final TunnelClient client;
+    private final HttpClient http = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5)).build();
 
     public RemoteToolController(TunnelClient client) {
         this.client = client;
@@ -101,6 +109,73 @@ public class RemoteToolController implements ToolController {
     @Override
     public String meshClearToken() throws IOException {
         return client.meshClearToken();
+    }
+
+    // ── 房间 & 网络(直接走 HTTP,后端 ApiHandler) ──
+
+    @Override
+    public String roomCreate(String name) throws IOException {
+        return httpPost("/api/rooms/create", "{\"name\":\"" + name + "\"}");
+    }
+
+    @Override
+    public String roomJoin(String link) throws IOException {
+        return httpPost("/api/rooms/join", "{\"link\":\"" + link + "\"}");
+    }
+
+    @Override
+    public void roomLeave() throws IOException {
+        httpPost("/api/rooms/leave", null);
+    }
+
+    @Override
+    public String roomCurrent() throws IOException {
+        return httpGet("/api/rooms/current");
+    }
+
+    @Override
+    public String networkList() throws IOException {
+        return httpGet("/api/rooms/networks");
+    }
+
+    @Override
+    public String networkCreate(String type, String name) throws IOException {
+        return httpPost("/api/rooms/networks",
+                "{\"type\":\"" + type + "\",\"name\":\"" + name + "\"}");
+    }
+
+    private String httpPost(String path, String body) throws IOException {
+        try {
+            HttpRequest.Builder rb = HttpRequest.newBuilder()
+                    .uri(URI.create(client.getBaseUrl() + path))
+                    .timeout(Duration.ofSeconds(10));
+            if (body != null) {
+                rb.header("Content-Type", "application/json")
+                  .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+            } else {
+                rb.POST(HttpRequest.BodyPublishers.noBody());
+            }
+            HttpResponse<String> resp = http.send(rb.build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            return resp.body();
+        } catch (Exception e) {
+            throw new IOException(e.getMessage(), e);
+        }
+    }
+
+    private String httpGet(String path) throws IOException {
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(client.getBaseUrl() + path))
+                    .timeout(Duration.ofSeconds(10))
+                    .GET()
+                    .build();
+            HttpResponse<String> resp = http.send(req,
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            return resp.body();
+        } catch (Exception e) {
+            throw new IOException(e.getMessage(), e);
+        }
     }
 
     @Override

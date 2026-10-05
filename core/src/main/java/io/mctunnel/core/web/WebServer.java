@@ -3,6 +3,7 @@ package io.mctunnel.core.web;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import io.mctunnel.core.room.RoomManager;
 import io.mctunnel.core.tunnel.TunnelTool;
 import io.mctunnel.core.tunnel.TunnelType;
 
@@ -24,15 +25,22 @@ public class WebServer {
 
     private final int port;
     private final Map<TunnelType, TunnelTool> tools;
+    private final RoomManager roomManager;
     private HttpServer server;
 
     public WebServer(Map<TunnelType, TunnelTool> tools) {
-        this(tools, Integer.parseInt(
+        this(tools, null, Integer.parseInt(
                 System.getenv().getOrDefault("MCTUNNEL_WEB_PORT", "8787")));
     }
 
-    public WebServer(Map<TunnelType, TunnelTool> tools, int port) {
+    public WebServer(Map<TunnelType, TunnelTool> tools, RoomManager roomManager) {
+        this(tools, roomManager, Integer.parseInt(
+                System.getenv().getOrDefault("MCTUNNEL_WEB_PORT", "8787")));
+    }
+
+    public WebServer(Map<TunnelType, TunnelTool> tools, RoomManager roomManager, int port) {
         this.tools = tools;
+        this.roomManager = roomManager;
         this.port = port;
     }
 
@@ -43,7 +51,7 @@ public class WebServer {
         // 静态页面
         server.createContext("/", new StaticHandler());
         // REST API
-        server.createContext("/api", new ApiHandler(tools));
+        server.createContext("/api", new ApiHandler(tools, roomManager));
 
         server.start();
         System.out.println("[MC-Tunnel] WebUI started at http://localhost:" + port);

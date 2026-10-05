@@ -311,7 +311,7 @@ public class MeshManager {
                     + "\"nodeId\":\"" + esc(m.nodeId()) + "\","
                     + "\"sender\":\"" + esc(m.sender()) + "\","
                     + "\"content\":\"" + esc(m.content()) + "\","
-                    + "\"timestamp\":" + m.timestamp() + "}";
+                    + "\"timestamp\":" + m.timestamp() + "," + "\"roomId\":\"" + esc(m.roomId()) + "\"}";
         }
 
         static ChatMessage parse(String json) {
@@ -321,8 +321,9 @@ public class MeshManager {
             String sender = extract(json, "sender");
             String content = extract(json, "content");
             long ts = extractLong(json, "timestamp");
+            String roomId = extract(json, "roomId");
             if (id == null || content == null) return null;
-            return new ChatMessage(id, nodeId, sender, content, ts);
+            return new ChatMessage(id, nodeId, sender, content, ts, roomId == null ? "" : roomId);
         }
 
         private static String extract(String json, String field) {

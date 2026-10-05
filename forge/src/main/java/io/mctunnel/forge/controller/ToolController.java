@@ -82,6 +82,26 @@ public interface ToolController {
     /** 清除已保存的 API 令牌 */
     String meshClearToken() throws IOException;
 
+    // ── 房间 & 网络 ──
+
+    /** 创建房间,返回加入链接 */
+    String roomCreate(String name) throws IOException;
+
+    /** 通过链接加入房间 */
+    String roomJoin(String link) throws IOException;
+
+    /** 离开/关闭房间 */
+    void roomLeave() throws IOException;
+
+    /** 获取当前房间信息(JSON 字符串),null 表示未加入 */
+    String roomCurrent() throws IOException;
+
+    /** 获取当前房间的网络列表(JSON 数组) */
+    String networkList() throws IOException;
+
+    /** 在当前房间创建网络 */
+    String networkCreate(String type, String name) throws IOException;
+
     /** 后端描述(用于 GUI 显示) */
     String describeBackend();
 }
