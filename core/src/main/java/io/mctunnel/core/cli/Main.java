@@ -8,6 +8,7 @@ import io.mctunnel.core.network.NatTraversalNetwork;
 import io.mctunnel.core.network.Network;
 import io.mctunnel.core.network.VirtualNetwork;
 import io.mctunnel.core.room.NetworkType;
+import io.mctunnel.core.room.DeviceStatus;
 import io.mctunnel.core.room.RoomManager;
 import io.mctunnel.core.room.RoomNetwork;
 import io.mctunnel.core.storage.ChatStorage;
@@ -744,6 +745,13 @@ public final class Main {
         // 房间管理器(初始网络主机)
         RoomManager rm = new RoomManager(nodeId, System.getProperty("user.name"), storage);
         rm.loadLastRoom();
+        if (rm.getCurrentRoom() != null) {
+            try {
+                rm.sendMyStatus(DeviceStatus.collect(tools));
+            } catch (Exception ignored) {
+                // serve 启动时上报失败不阻塞
+            }
+        }
 
         WebServer web = new WebServer(tools, rm);
         web.start();
@@ -821,6 +829,7 @@ public final class Main {
                 String name = args.length > 1 ? args[1] : "MC-Tunnel 房间";
                 ensureRoomManager();
                 String link = roomManager.createRoom(DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, name);
+                reportMyStatus();
                 System.out.println("房间已创建: " + name);
                 System.out.println("加入链接(发给成员): " + link);
             }
@@ -831,6 +840,7 @@ public final class Main {
                 }
                 ensureRoomManager();
                 roomManager.joinRoom(args[1]);
+                reportMyStatus();
                 System.out.println("已加入房间: " + roomManager.getCurrentRoom().name());
                 System.out.println("成员: " + roomManager.getMembers().size());
             }
@@ -897,6 +907,14 @@ public final class Main {
                 }
             }
             default -> System.err.println("Unknown network subcommand: " + sub);
+        }
+    }
+
+    private static void reportMyStatus() {
+        try {
+            roomManager.sendMyStatus(DeviceStatus.collect(tools));
+        } catch (Exception e) {
+            System.err.println("状态上报失败: " + e.getMessage());
         }
     }
 

@@ -102,6 +102,9 @@ public interface ToolController {
     /** 在当前房间创建网络 */
     String networkCreate(String type, String name) throws IOException;
 
+    /** 上报本机网络状态到当前房间(其他成员可见) */
+    void reportStatus() throws IOException;
+
     /** 后端描述(用于 GUI 显示) */
     String describeBackend();
 }

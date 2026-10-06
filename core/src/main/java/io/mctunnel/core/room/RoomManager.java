@@ -6,7 +6,9 @@ import io.mctunnel.core.storage.ChatStorage;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -26,8 +28,12 @@ public class RoomManager {
     private volatile Room currentRoom;
     private final List<RoomMember> members = new CopyOnWriteArrayList<>();
     private final List<ChatHandler> chatHandlers = new CopyOnWriteArrayList<>();
+    /** 成员网络状态缓存(nodeId -> status JSON 对象),含本机 */
+    private final Map<String, String> memberStatus = new ConcurrentHashMap<>();
+    private final List<MemberStatusHandler> statusHandlers = new CopyOnWriteArrayList<>();
 
     public interface ChatHandler { void onChat(ChatMessage msg); }
+    public interface MemberStatusHandler { void onMemberStatus(String nodeId, String statusJson); }
 
     public RoomManager(String selfNodeId, String displayName, ChatStorage storage) {
         this.selfNodeId = selfNodeId;
@@ -40,6 +46,7 @@ public class RoomManager {
     public List<RoomMember> getMembers() { return List.copyOf(members); }
 
     public void onChat(ChatHandler h) { chatHandlers.add(h); }
+    public void onMemberStatus(MemberStatusHandler h) { statusHandlers.add(h); }
 
     // ── 房间操作 ──────────────────────────────────────────
 
@@ -62,13 +69,16 @@ public class RoomManager {
             }
             @Override public void onMemberLeft(String nodeId) {
                 members.removeIf(x -> x.nodeId().equals(nodeId));
+                memberStatus.remove(nodeId);
                 storage.removeRoomMember(currentRoom.id(), nodeId);
             }
         });
+        relay.onMemberStatus(this::onRelayMemberStatus);
         relay.onRoomClosed(rid -> {
             // 房主关闭了房间,清理本地状态
             currentRoom = null;
             members.clear();
+            memberStatus.clear();
         });
         relay.connect(relayHost, relayPort);
         relay.createRoom(name);
@@ -78,6 +88,7 @@ public class RoomManager {
         currentRoom = new Room(roomId, name, selfNodeId, System.currentTimeMillis());
         storage.saveRoom(currentRoom);
         storage.addRoomMember(roomId, new RoomMember(selfNodeId, displayName, System.currentTimeMillis()));
+        members.removeIf(x -> x.nodeId().equals(selfNodeId));
         members.add(new RoomMember(selfNodeId, displayName, System.currentTimeMillis()));
         return LinkCodec.encode(relayHost, relayPort, roomId);
     }
@@ -99,9 +110,11 @@ public class RoomManager {
             }
             @Override public void onMemberLeft(String nodeId) {
                 members.removeIf(x -> x.nodeId().equals(nodeId));
+                memberStatus.remove(nodeId);
                 if (currentRoom != null) storage.removeRoomMember(currentRoom.id(), nodeId);
             }
         });
+        relay.onMemberStatus(this::onRelayMemberStatus);
         relay.onRoomClosed(rid -> {
             currentRoom = null;
             members.clear();
@@ -115,9 +128,12 @@ public class RoomManager {
         }
         currentRoom = room;
         storage.addRoomMember(jl.roomId(), new RoomMember(selfNodeId, displayName, System.currentTimeMillis()));
+        members.removeIf(x -> x.nodeId().equals(selfNodeId));
         members.add(new RoomMember(selfNodeId, displayName, System.currentTimeMillis()));
-        // 从存储加载已有成员
-        members.addAll(storage.loadRoomMembers(jl.roomId()));
+        // 从存储加载已有成员(跳过自身,避免与上面的 self 重复)
+        for (RoomMember m : storage.loadRoomMembers(jl.roomId())) {
+            if (!m.nodeId().equals(selfNodeId)) members.add(m);
+        }
     }
 
     /** 离开/关闭房间.若当前节点是房主,则关闭房间并通知所有成员 */
@@ -138,6 +154,7 @@ public class RoomManager {
         }
         currentRoom = null;
         members.clear();
+        memberStatus.clear();
     }
 
     // ── 聊天 ──────────────────────────────────────────────
@@ -157,6 +174,30 @@ public class RoomManager {
         // 中继转发来的消息(其他成员发的),持久化并通知本地
         storage.saveMessage(msg);
         for (ChatHandler h : chatHandlers) h.onChat(msg);
+    }
+
+    private void onRelayMemberStatus(String nodeId, String statusJson) {
+        memberStatus.put(nodeId, statusJson);
+        for (MemberStatusHandler h : statusHandlers) h.onMemberStatus(nodeId, statusJson);
+    }
+
+    /** 上报本机网络状态到当前房间(同时更新本地缓存) */
+    public void sendMyStatus(String statusJson) throws IOException {
+        if (relay == null || currentRoom == null) {
+            throw new IOException("未加入房间");
+        }
+        relay.sendMemberStatus(statusJson);
+        memberStatus.put(selfNodeId, statusJson);
+    }
+
+    /** 全部成员的网络状态快照(nodeId -> status JSON),含本机;未上报的成员不在此 map */
+    public Map<String, String> getMemberStatus() {
+        return Map.copyOf(memberStatus);
+    }
+
+    /** 指定成员的网络状态 JSON;未上报返回 null */
+    public String getMemberStatus(String nodeId) {
+        return memberStatus.get(nodeId);
     }
 
     /** 读取当前房间的聊天历史 */

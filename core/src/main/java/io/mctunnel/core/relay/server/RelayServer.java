@@ -153,6 +153,7 @@ public class RelayServer {
             case "leave_room" -> handleLeaveRoom(conn);
             case "close_room" -> handleCloseRoom(conn);
             case "chat" -> handleChat(conn, text);
+            case "member_status" -> handleMemberStatus(conn, text);
             case "ping" -> send(conn, "{\"type\":\"pong\"}");
             default -> { /* ignore */ }
         }
@@ -163,6 +164,8 @@ public class RelayServer {
         if (name == null) name = "Room";
         String displayName = field(text, "displayName");
         if (displayName == null) displayName = "host";
+        String clientNodeId = field(text, "nodeId");
+        if (clientNodeId != null && !clientNodeId.isBlank()) conn.nodeId = clientNodeId;
         String roomId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         String link = LinkCodec.encode(publicHost, port, roomId);
         rooms.createRoom(roomId, name, conn.nodeId);
@@ -182,6 +185,8 @@ public class RelayServer {
             send(conn, "{\"type\":\"error\",\"message\":\"房间不存在\"}");
             return;
         }
+        String clientNodeId = field(text, "nodeId");
+        if (clientNodeId != null && !clientNodeId.isBlank()) conn.nodeId = clientNodeId;
         conn.roomId = roomId;
         rooms.addMember(roomId, new RoomMember(conn.nodeId, displayName, System.currentTimeMillis()));
         rooms.addConnection(roomId, conn.nodeId, conn);
@@ -192,6 +197,13 @@ public class RelayServer {
         // 广播给房间内其他成员
         broadcast(roomId, "{\"type\":\"member_joined\",\"nodeId\":\"" + conn.nodeId
                 + "\",\"displayName\":\"" + esc(displayName) + "\"}", conn.nodeId);
+        // 新成员加入:推送房间内其他成员已缓存的网络状态
+        for (Map.Entry<String, String> e : rooms.memberStatuses(roomId).entrySet()) {
+            if (!e.getKey().equals(conn.nodeId)) {
+                send(conn, "{\"type\":\"member_status\",\"nodeId\":\"" + esc(e.getKey())
+                        + "\",\"status\":" + e.getValue() + "}");
+            }
+        }
         System.out.println("[Relay] " + conn.nodeId + " joined room " + roomId);
     }
 
@@ -225,6 +237,20 @@ public class RelayServer {
         broadcast(conn.roomId, json, conn.nodeId);
     }
 
+    private void handleMemberStatus(WsConn conn, String text) {
+        if (conn.roomId == null) return;
+        String nodeId = field(text, "nodeId");
+        if (nodeId == null) return;
+        // 仅接受房间成员自身的状态上报(防止冒名)
+        if (!rooms.isMember(conn.roomId, nodeId)) return;
+        String status = extractJsonValue(text, "status");
+        if (status == null) return;
+        rooms.cacheMemberStatus(conn.roomId, nodeId, status);
+        // 广播给房间内其他成员(上报者本地已有自己的状态,跳过)
+        broadcast(conn.roomId, "{\"type\":\"member_status\",\"nodeId\":\""
+                + esc(nodeId) + "\",\"status\":" + status + "}", nodeId);
+    }
+
     // ── 广播 ──────────────────────────────────────────────
 
     private void broadcast(String roomId, String json, String excludeNodeId) {
@@ -243,6 +269,47 @@ public class RelayServer {
     }
 
     // ── JSON 小工具 ───────────────────────────────────────
+
+    /** 提取 "key": 后的 JSON 值(对象/字符串/数字),原样返回子串 */
+    private static String extractJsonValue(String json, String key) {
+        String k = "\"" + key + "\"";
+        int idx = json.indexOf(k);
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + k.length());
+        if (colon < 0) return null;
+        int start = colon + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length()) return null;
+        char c = json.charAt(start);
+        if (c == '{') {
+            int depth = 0;
+            boolean inStr = false;
+            for (int i = start; i < json.length(); i++) {
+                char ch = json.charAt(i);
+                if (inStr) {
+                    if (ch == '\\') i++;
+                    else if (ch == '"') inStr = false;
+                } else if (ch == '"') inStr = true;
+                else if (ch == '{') depth++;
+                else if (ch == '}') {
+                    depth--;
+                    if (depth == 0) return json.substring(start, i + 1);
+                }
+            }
+            return null;
+        }
+        if (c == '"') {
+            for (int i = start + 1; i < json.length(); i++) {
+                char ch = json.charAt(i);
+                if (ch == '\\') i++;
+                else if (ch == '"') return json.substring(start, i + 1);
+            }
+            return null;
+        }
+        int end = start;
+        while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') end++;
+        return json.substring(start, end).trim();
+    }
 
     private static String field(String json, String key) {
         String k = "\"" + key + "\"";
@@ -400,6 +467,28 @@ public class RelayServer {
             RoomState r = rooms.get(roomId);
             return r == null ? List.of() : r.connections();
         }
+
+        /** 缓存成员网络状态(nodeId -> status JSON 对象) */
+        void cacheMemberStatus(String roomId, String nodeId, String status) {
+            RoomState r = rooms.get(roomId);
+            if (r != null) r.memberStatus.put(nodeId, status);
+        }
+
+        /** nodeId 是否为房间成员 */
+        boolean isMember(String roomId, String nodeId) {
+            RoomState r = rooms.get(roomId);
+            if (r == null) return false;
+            for (RoomMember m : r.members) {
+                if (m.nodeId().equals(nodeId)) return true;
+            }
+            return false;
+        }
+
+        /** 房间内全部成员的已缓存状态快照 */
+        java.util.Map<String, String> memberStatuses(String roomId) {
+            RoomState r = rooms.get(roomId);
+            return r == null ? java.util.Map.of() : new java.util.HashMap<>(r.memberStatus);
+        }
     }
 
     private static final class RoomState {
@@ -409,6 +498,8 @@ public class RelayServer {
         final List<RoomMember> members = new CopyOnWriteArrayList<>();
         /** 当前在线连接(nodeId -> conn) */
         final Map<String, WsConn> conns = new ConcurrentHashMap<>();
+        /** 成员网络状态缓存(nodeId -> status JSON 对象) */
+        final Map<String, String> memberStatus = new ConcurrentHashMap<>();
 
         RoomState(String roomId, String name, String hostNodeId) {
             this.roomId = roomId;
@@ -424,6 +515,7 @@ public class RelayServer {
         void removeMember(String nodeId) {
             members.removeIf(x -> x.nodeId().equals(nodeId));
             conns.remove(nodeId);
+            memberStatus.remove(nodeId);
         }
 
         List<RoomMember> members() {

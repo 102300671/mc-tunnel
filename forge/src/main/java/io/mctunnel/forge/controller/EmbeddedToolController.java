@@ -161,13 +161,16 @@ public class EmbeddedToolController implements ToolController {
         if (roomManager == null) throw new IOException("房间管理器未初始化");
         String relayHost = System.getenv().getOrDefault("MCTUNNEL_RELAY_HOST", "59.110.163.88");
         int relayPort = Integer.parseInt(System.getenv().getOrDefault("MCTUNNEL_RELAY_PORT", "8721"));
-        return roomManager.createRoom(relayHost, relayPort, name);
+        String link = roomManager.createRoom(relayHost, relayPort, name);
+        reportStatus();
+        return link;
     }
 
     @Override
     public String roomJoin(String link) throws IOException {
         if (roomManager == null) throw new IOException("房间管理器未初始化");
         roomManager.joinRoom(link);
+        reportStatus();
         Room r = roomManager.getCurrentRoom();
         if (r == null) return "{}";
         return "{\"roomId\":\"" + esc(r.id())
@@ -194,12 +197,22 @@ public class EmbeddedToolController implements ToolController {
         boolean first = true;
         for (RoomMember m : roomManager.getMembers()) {
             if (!first) sb.append(",");
+            String st = roomManager.getMemberStatus(m.nodeId());
             sb.append("{\"nodeId\":\"").append(esc(m.nodeId()))
-              .append("\",\"displayName\":\"").append(esc(m.displayName())).append("\"}");
+              .append("\",\"displayName\":\"").append(esc(m.displayName()))
+              .append("\",\"status\":").append(st == null ? "null" : st)
+              .append(",\"statusSummary\":\"")
+              .append(esc(io.mctunnel.core.room.DeviceStatus.summary(st))).append("\"}");
             first = false;
         }
         sb.append("]}");
         return sb.toString();
+    }
+
+    @Override
+    public void reportStatus() throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) return;
+        roomManager.sendMyStatus(io.mctunnel.core.room.DeviceStatus.collect(tools));
     }
 
     @Override

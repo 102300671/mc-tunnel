@@ -46,6 +46,7 @@ public class RelayClient {
     private final List<MemberEventHandler> memberHandlers = new CopyOnWriteArrayList<>();
     private final List<RoomClosedHandler> roomClosedHandlers = new CopyOnWriteArrayList<>();
     private final List<ConnectionListener> connListeners = new CopyOnWriteArrayList<>();
+    private final List<MemberStatusHandler> statusHandlers = new CopyOnWriteArrayList<>();
     private Thread readThread;
 
     public RelayClient(String nodeId, String displayName) {
@@ -63,11 +64,14 @@ public class RelayClient {
     public interface MemberEventHandler { void onMemberJoined(RoomMember m); void onMemberLeft(String nodeId); }
     public interface RoomClosedHandler { void onRoomClosed(String roomId); }
     public interface ConnectionListener { void onDisconnected(); }
+    /** 成员网络状态事件:onMemberStatus(nodeId, statusJson) */
+    public interface MemberStatusHandler { void onMemberStatus(String nodeId, String statusJson); }
 
     public void onChat(ChatHandler h) { chatHandlers.add(h); }
     public void onMemberEvent(MemberEventHandler h) { memberHandlers.add(h); }
     public void onRoomClosed(RoomClosedHandler h) { roomClosedHandlers.add(h); }
     public void onDisconnect(ConnectionListener l) { connListeners.add(l); }
+    public void onMemberStatus(MemberStatusHandler h) { statusHandlers.add(h); }
 
     // ── 连接 ──────────────────────────────────────────────
 
@@ -114,7 +118,8 @@ public class RelayClient {
     /** 创建房间(房主),返回加入链接 */
     public String createRoom(String name) throws IOException {
         sendJson("{\"type\":\"create_room\",\"name\":\"" + esc(name)
-                + "\",\"displayName\":\"" + esc(displayName) + "\"}");
+                + "\",\"displayName\":\"" + esc(displayName)
+                + "\",\"nodeId\":\"" + esc(nodeId) + "\"}");
         return null; // 链接通过 room_created 事件异步返回,由调用方监听
     }
 
@@ -130,7 +135,8 @@ public class RelayClient {
     /** 加入指定房间(需已连接) */
     public void joinRoomById(String roomId) throws IOException {
         sendJson("{\"type\":\"join_room\",\"roomId\":\"" + roomId
-                + "\",\"displayName\":\"" + esc(displayName) + "\"}");
+                + "\",\"displayName\":\"" + esc(displayName)
+                + "\",\"nodeId\":\"" + esc(nodeId) + "\"}");
         this.roomId = roomId;
     }
 
@@ -149,6 +155,12 @@ public class RelayClient {
     public void sendChat(String sender, String content) throws IOException {
         sendJson("{\"type\":\"chat\",\"sender\":\"" + esc(sender)
                 + "\",\"content\":\"" + esc(content) + "\"}");
+    }
+
+    /** 上报本机网络状态到当前房间(statusJson 为 JSON 对象字符串) */
+    public void sendMemberStatus(String statusJson) throws IOException {
+        sendJson("{\"type\":\"member_status\",\"nodeId\":\"" + esc(nodeId)
+                + "\",\"status\":" + statusJson + "}");
     }
 
     // ── 读循环 ────────────────────────────────────────────
@@ -208,6 +220,26 @@ public class RelayClient {
             }
             case "room_joined" -> {
                 this.roomId = field(text, "roomId");
+                // 回填房间现有成员(room_joined.members 数组)
+                String arr = extractJsonArray(text, "members");
+                if (arr != null) {
+                    for (String m : splitJsonArray(arr)) {
+                        String nid = field(m, "nodeId");
+                        String dn = field(m, "displayName");
+                        if (nid != null) {
+                            for (MemberEventHandler h : memberHandlers)
+                                h.onMemberJoined(new RoomMember(nid,
+                                        dn == null ? "" : dn, System.currentTimeMillis()));
+                        }
+                    }
+                }
+            }
+            case "member_status" -> {
+                String nid = field(text, "nodeId");
+                String status = extractJsonObject(text, "status");
+                if (nid != null && status != null) {
+                    for (MemberStatusHandler h : statusHandlers) h.onMemberStatus(nid, status);
+                }
             }
             // room_created / room_joined / error 等暂不特别处理
         }
@@ -293,6 +325,91 @@ public class RelayClient {
         if (q2 < 0) return null;
         return json.substring(q1 + 1, q2).replace("\\\"", "\"")
                 .replace("\\\\", "\\").replace("\\n", "\n").replace("\\r", "\r");
+    }
+
+    /** 提取 "key": 后的 JSON 对象(平衡括号,含嵌套) */
+    private static String extractJsonObject(String json, String key) {
+        String k = "\"" + key + "\"";
+        int idx = json.indexOf(k);
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + k.length());
+        if (colon < 0) return null;
+        int start = colon + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length() || json.charAt(start) != '{') return null;
+        int depth = 0;
+        boolean inStr = false;
+        for (int i = start; i < json.length(); i++) {
+            char ch = json.charAt(i);
+            if (inStr) {
+                if (ch == '\\') i++;
+                else if (ch == '"') inStr = false;
+            } else if (ch == '"') inStr = true;
+            else if (ch == '{') depth++;
+            else if (ch == '}') {
+                depth--;
+                if (depth == 0) return json.substring(start, i + 1);
+            }
+        }
+        return null;
+    }
+
+    /** 提取 "key":[..] 数组子串(平衡括号) */
+    private static String extractJsonArray(String json, String key) {
+        String k = "\"" + key + "\"";
+        int idx = json.indexOf(k);
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + k.length());
+        if (colon < 0) return null;
+        int start = colon + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length() || json.charAt(start) != '[') return null;
+        int depth = 0;
+        boolean inStr = false;
+        for (int i = start; i < json.length(); i++) {
+            char ch = json.charAt(i);
+            if (inStr) {
+                if (ch == '\\') i++;
+                else if (ch == '"') inStr = false;
+            } else if (ch == '"') inStr = true;
+            else if (ch == '[') depth++;
+            else if (ch == ']') {
+                depth--;
+                if (depth == 0) return json.substring(start, i + 1);
+            }
+        }
+        return null;
+    }
+
+    /** 数组按元素拆分(支持对象嵌套) */
+    private static java.util.List<String> splitJsonArray(String arr) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        int i = 0;
+        while (i < arr.length()) {
+            char c = arr.charAt(i);
+            if (c == '{') {
+                int depth = 0;
+                boolean inStr = false;
+                int j = i;
+                for (; j < arr.length(); j++) {
+                    char ch = arr.charAt(j);
+                    if (inStr) {
+                        if (ch == '\\') j++;
+                        else if (ch == '"') inStr = false;
+                    } else if (ch == '"') inStr = true;
+                    else if (ch == '{') depth++;
+                    else if (ch == '}') {
+                        depth--;
+                        if (depth == 0) break;
+                    }
+                }
+                out.add(arr.substring(i, j + 1));
+                i = j + 1;
+            } else {
+                i++;
+            }
+        }
+        return out;
     }
 
     private static long fieldLong(String json, String key) {

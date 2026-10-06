@@ -144,6 +144,11 @@ public class RemoteToolController implements ToolController {
                 "{\"type\":\"" + type + "\",\"name\":\"" + name + "\"}");
     }
 
+    @Override
+    public void reportStatus() throws IOException {
+        httpPost("/api/rooms/status", null);
+    }
+
     private String httpPost(String path, String body) throws IOException {
         try {
             HttpRequest.Builder rb = HttpRequest.newBuilder()

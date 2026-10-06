@@ -111,6 +111,8 @@ class ApiHandler implements HttpHandler {
                 handleGetMessages(exchange);
             } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/chat")) {
                 handleSendChat(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/status")) {
+                handleReportStatus(exchange);
             } else {
                 WebServer.sendResponse(exchange, 404,
                         "{\"error\":\"Not found: " + path + "\"}");
@@ -327,8 +329,12 @@ class ApiHandler implements HttpHandler {
         boolean first = true;
         for (RoomMember m : roomManager.getMembers()) {
             if (!first) sb.append(",");
+            String st = roomManager.getMemberStatus(m.nodeId());
             sb.append("{\"nodeId\":\"").append(esc(m.nodeId()))
-              .append("\",\"displayName\":\"").append(esc(m.displayName())).append("\"}");
+              .append("\",\"displayName\":\"").append(esc(m.displayName()))
+              .append("\",\"status\":").append(st == null ? "null" : st)
+              .append(",\"statusSummary\":\"")
+              .append(esc(io.mctunnel.core.room.DeviceStatus.summary(st))).append("\"}");
             first = false;
         }
         sb.append("]}");
@@ -352,6 +358,7 @@ class ApiHandler implements HttpHandler {
             relayPort = Integer.parseInt(relayPortStr);
         try {
             String link = roomManager.createRoom(relayHost, relayPort, name);
+            roomManager.sendMyStatus(io.mctunnel.core.room.DeviceStatus.collect(tools));
             Room r = roomManager.getCurrentRoom();
             WebServer.sendResponse(exchange, 200,
                     "{\"link\":\"" + esc(link) + "\",\"roomId\":\"" + esc(r.id()) + "\"}");
@@ -373,6 +380,7 @@ class ApiHandler implements HttpHandler {
         }
         try {
             roomManager.joinRoom(link);
+            roomManager.sendMyStatus(io.mctunnel.core.room.DeviceStatus.collect(tools));
             Room r = roomManager.getCurrentRoom();
             WebServer.sendResponse(exchange, 200,
                     "{\"roomId\":\"" + esc(r.id()) + "\",\"name\":\"" + esc(r.name())
@@ -456,6 +464,19 @@ class ApiHandler implements HttpHandler {
         }
         sb.append("]");
         WebServer.sendResponse(exchange, 200, sb.toString());
+    }
+
+    private void handleReportStatus(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 200, "{\"result\":\"not_in_room\"}");
+            return;
+        }
+        try {
+            roomManager.sendMyStatus(io.mctunnel.core.room.DeviceStatus.collect(tools));
+            WebServer.sendResponse(exchange, 200, "{\"result\":\"reported\"}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
     }
 
     private void handleSendChat(HttpExchange exchange) throws IOException {
