@@ -102,6 +102,15 @@ public interface ToolController {
     /** 在当前房间创建网络 */
     String networkCreate(String type, String name) throws IOException;
 
+    /** 启动房间网络:本机成为房间服务端并广播端点(房主) */
+    String networkStart(String id) throws IOException;
+
+    /** 停止房间网络:停止本机房间服务端并回退云中继(房主) */
+    String networkStop(String id) throws IOException;
+
+    /** 连接到房间网络的端点(成员手动切换) */
+    String networkConnect(String id) throws IOException;
+
     /** 上报本机网络状态到当前房间(其他成员可见) */
     void reportStatus() throws IOException;
 

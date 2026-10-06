@@ -103,6 +103,12 @@ class ApiHandler implements HttpHandler {
                 handleJoinRoom(exchange);
             } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/leave")) {
                 handleLeaveRoom(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/networks/start")) {
+                handleNetworkStart(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/networks/stop")) {
+                handleNetworkStop(exchange);
+            } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/networks/connect")) {
+                handleNetworkConnect(exchange);
             } else if ("GET".equalsIgnoreCase(method) && path.equals("/api/rooms/networks")) {
                 handleListNetworks(exchange);
             } else if ("POST".equalsIgnoreCase(method) && path.equals("/api/rooms/networks")) {
@@ -444,6 +450,114 @@ class ApiHandler implements HttpHandler {
         roomManager.registerNetwork(net);
         WebServer.sendResponse(exchange, 200,
                 "{\"id\":\"" + esc(net.id()) + "\",\"type\":\"" + esc(nt.name()) + "\"}");
+    }
+
+    private void handleNetworkStart(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"请先加入或创建房间\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String id = extractStringField(body, "id");
+        if (id == null || id.isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"缺少 id 参数\"}");
+            return;
+        }
+        try {
+            RoomNetwork data = findNetwork(id);
+            if (data == null) {
+                WebServer.sendResponse(exchange, 404, "{\"error\":\"网络不存在\"}");
+                return;
+            }
+            io.mctunnel.core.network.Network net;
+            if (data.type() == io.mctunnel.core.room.NetworkType.NAT_TRAVERSAL) {
+                io.mctunnel.core.network.NatTraversalNetwork n =
+                        new io.mctunnel.core.network.NatTraversalNetwork(
+                                (io.mctunnel.core.tunnel.NgrokAdapter) tools.get(TunnelType.NGROK));
+                n.setLocalPort(roomManager.getRoomServerPort());
+                net = n;
+            } else {
+                net = new io.mctunnel.core.network.VirtualNetwork(
+                        (io.mctunnel.core.tunnel.TailscaleAdapter) tools.get(TunnelType.TAILSCALE));
+            }
+            net.start();
+            String endpoint = net.getEndpoint();
+            if (endpoint == null || endpoint.isBlank()) {
+                WebServer.sendResponse(exchange, 502,
+                        "{\"error\":\"未获取到对外端点(检查 ngrok/tailscale 状态)\"}");
+                return;
+            }
+            if (data.type() == io.mctunnel.core.room.NetworkType.VIRTUAL && !endpoint.contains(":")) {
+                endpoint = endpoint + ":" + roomManager.getRoomServerPort();
+            }
+            roomManager.activateAsRoomServer(endpoint);
+            roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
+                    io.mctunnel.core.room.NetworkStatus.ACTIVE, endpoint,
+                    data.hostNodeId(), data.createdAt()));
+            WebServer.sendResponse(exchange, 200,
+                    "{\"endpoint\":\"" + esc(endpoint) + "\",\"active\":true}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
+    private void handleNetworkStop(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"请先加入或创建房间\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String id = extractStringField(body, "id");
+        if (id == null || id.isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"缺少 id 参数\"}");
+            return;
+        }
+        RoomNetwork data = findNetwork(id);
+        if (data == null) {
+            WebServer.sendResponse(exchange, 404, "{\"error\":\"网络不存在\"}");
+            return;
+        }
+        roomManager.deactivateRoomServer();
+        roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
+                io.mctunnel.core.room.NetworkStatus.STOPPED, null,
+                data.hostNodeId(), data.createdAt()));
+        WebServer.sendResponse(exchange, 200, "{\"active\":false}");
+    }
+
+    private void handleNetworkConnect(HttpExchange exchange) throws IOException {
+        if (roomManager == null || roomManager.getCurrentRoom() == null) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"请先加入或创建房间\"}");
+            return;
+        }
+        String body = readBody(exchange);
+        String id = extractStringField(body, "id");
+        if (id == null || id.isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"缺少 id 参数\"}");
+            return;
+        }
+        RoomNetwork data = findNetwork(id);
+        if (data == null) {
+            WebServer.sendResponse(exchange, 404, "{\"error\":\"网络不存在\"}");
+            return;
+        }
+        if (data.endpoint() == null || data.endpoint().isBlank()) {
+            WebServer.sendResponse(exchange, 400, "{\"error\":\"该网络尚未启动,无端点可连接\"}");
+            return;
+        }
+        try {
+            roomManager.connectToEndpoint(data.endpoint());
+            WebServer.sendResponse(exchange, 200,
+                    "{\"endpoint\":\"" + esc(data.endpoint()) + "\",\"active\":true}");
+        } catch (IOException e) {
+            WebServer.sendResponse(exchange, 502, "{\"error\":\"" + esc(e.getMessage()) + "\"}");
+        }
+    }
+
+    private RoomNetwork findNetwork(String id) {
+        for (RoomNetwork n : roomManager.getNetworks()) {
+            if (n.id().equals(id)) return n;
+        }
+        return null;
     }
 
     private void handleGetMessages(HttpExchange exchange) throws IOException {

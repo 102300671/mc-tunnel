@@ -145,6 +145,21 @@ public class RemoteToolController implements ToolController {
     }
 
     @Override
+    public String networkStart(String id) throws IOException {
+        return httpPost("/api/rooms/networks/start", "{\"id\":\"" + id + "\"}");
+    }
+
+    @Override
+    public String networkStop(String id) throws IOException {
+        return httpPost("/api/rooms/networks/stop", "{\"id\":\"" + id + "\"}");
+    }
+
+    @Override
+    public String networkConnect(String id) throws IOException {
+        return httpPost("/api/rooms/networks/connect", "{\"id\":\"" + id + "\"}");
+    }
+
+    @Override
     public void reportStatus() throws IOException {
         httpPost("/api/rooms/status", null);
     }

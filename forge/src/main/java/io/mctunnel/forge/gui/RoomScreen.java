@@ -64,6 +64,18 @@ public class RoomScreen extends Screen {
                         b -> networkCreate("virtual", "tailscale"))
                 .bounds(cx + 10, ny, 80, 20).build());
 
+        // 网络操作行(y=130): 启动/停止/连接(作用于网络列表中的第一个网络)
+        int oy = 130;
+        addRenderableWidget(Button.builder(Component.literal("启动网络"),
+                        b -> networkStart())
+                .bounds(cx - 92, oy, 58, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("停止网络"),
+                        b -> networkStop())
+                .bounds(cx - 30, oy, 58, 20).build());
+        addRenderableWidget(Button.builder(Component.literal("连接网络"),
+                        b -> networkConnect())
+                .bounds(cx + 32, oy, 58, 20).build());
+
         // 返回
         addRenderableWidget(Button.builder(Component.literal("返回"), b -> onClose())
                 .bounds(cx - 50, this.height - 35, 100, 20).build());
@@ -89,10 +101,10 @@ public class RoomScreen extends Screen {
         // 4. 网络列表(y=105+,在按钮下方)
         String netDisplay = formatNetworks();
         guiGraphics.drawCenteredString(this.font, Component.literal(netDisplay),
-                this.width / 2, 130, 0xffffff);
+                this.width / 2, 158, 0xffffff);
 
-        // 4.1 成员网络状态(y=150 起逐行)
-        int sy = 150;
+        // 4.1 成员网络状态(y=178 起逐行)
+        int sy = 178;
         String membersArr = extractJsonArray(currentRoomJson, "members");
         if (membersArr != null) {
             int shown = 0;
@@ -315,6 +327,65 @@ public class RoomScreen extends Screen {
         }, "mctunnel-room-refresh");
         t.setDaemon(true);
         t.start();
+    }
+
+    /** 启动房间网络(房主):启动底层工具并成为房间服务端 */
+    private void networkStart() {
+        String id = firstNetworkId();
+        if (id == null) {
+            showMessage("暂无网络可启动(先创建)");
+            return;
+        }
+        showMessage("启动网络...");
+        try {
+            String result = controller.networkStart(id);
+            showMessage("网络已启动: " + result);
+            refresh();
+        } catch (Exception e) {
+            showMessage("启动失败: " + e.getMessage());
+        }
+    }
+
+    /** 停止房间网络(房主):停止本机房间服务端并回退云中继 */
+    private void networkStop() {
+        String id = firstNetworkId();
+        if (id == null) {
+            showMessage("暂无网络可停止");
+            return;
+        }
+        try {
+            String result = controller.networkStop(id);
+            showMessage("网络已停止: " + result);
+            refresh();
+        } catch (Exception e) {
+            showMessage("停止失败: " + e.getMessage());
+        }
+    }
+
+    /** 连接房间网络端点(成员手动切换) */
+    private void networkConnect() {
+        String id = firstNetworkId();
+        if (id == null) {
+            showMessage("暂无网络可连接");
+            return;
+        }
+        try {
+            String result = controller.networkConnect(id);
+            showMessage("已连接: " + result);
+            refresh();
+        } catch (Exception e) {
+            showMessage("连接失败: " + e.getMessage());
+        }
+    }
+
+    /** 取网络列表中第一个网络的 id */
+    private String firstNetworkId() {
+        if (networksJson == null || networksJson.isBlank()) return null;
+        String arr = networksJson.trim();
+        if (!arr.startsWith("[")) return null;
+        java.util.List<String> items = splitJsonArray(arr);
+        if (items.isEmpty()) return null;
+        return extractJsonField(items.get(0), "id");
     }
 
     /** 在当前房间创建网络(type=nat/lan, name=ngrok/tailscale 等) */

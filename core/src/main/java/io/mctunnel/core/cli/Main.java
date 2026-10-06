@@ -8,6 +8,7 @@ import io.mctunnel.core.network.NatTraversalNetwork;
 import io.mctunnel.core.network.Network;
 import io.mctunnel.core.network.VirtualNetwork;
 import io.mctunnel.core.room.NetworkType;
+import io.mctunnel.core.room.NetworkStatus;
 import io.mctunnel.core.room.DeviceStatus;
 import io.mctunnel.core.room.RoomManager;
 import io.mctunnel.core.room.RoomNetwork;
@@ -871,7 +872,7 @@ public final class Main {
             return;
         }
         if (args.length == 0) {
-            System.out.println("Usage: network <create|list> [args...]");
+            System.out.println("Usage: network <create|start|stop|list> [args...]");
             return;
         }
         String sub = args[0].toLowerCase();
@@ -895,6 +896,8 @@ public final class Main {
                 System.out.println("网络已创建: " + name + " (" + type + ", id=" + data.id() + ")");
                 System.out.println("如需启动: 调用 network start " + data.id());
             }
+            case "start" -> cmdNetworkStart(args);
+            case "stop" -> cmdNetworkStop(args);
             case "list" -> {
                 var nets = roomManager.getNetworks();
                 if (nets.isEmpty()) {
@@ -908,6 +911,76 @@ public final class Main {
             }
             default -> System.err.println("Unknown network subcommand: " + sub);
         }
+    }
+
+    /** 启动房间网络:启动底层工具(ngrok tcp / tailscale)并让本机成为房间服务端 */
+    private static void cmdNetworkStart(String[] args) throws IOException {
+        if (args.length < 2) {
+            System.err.println("Usage: network start <id>");
+            return;
+        }
+        if (roomManager.getCurrentRoom() == null) {
+            System.err.println("请先加入或创建房间");
+            return;
+        }
+        String id = args[1];
+        RoomNetwork data = findNetworkById(id);
+        if (data == null) {
+            System.err.println("网络不存在: " + id);
+            return;
+        }
+        Network net = buildNetwork(data.type());
+        if (data.type() == NetworkType.NAT_TRAVERSAL) {
+            ((NatTraversalNetwork) net).setLocalPort(roomManager.getRoomServerPort());
+        }
+        net.start();
+        String endpoint = net.getEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            System.err.println("网络启动失败:未获取到对外端点(检查 ngrok/tailscale 状态)");
+            return;
+        }
+        if (data.type() == NetworkType.VIRTUAL && !endpoint.contains(":")) {
+            endpoint = endpoint + ":" + roomManager.getRoomServerPort();
+        }
+        roomManager.activateAsRoomServer(endpoint);
+        RoomNetwork updated = new RoomNetwork(data.id(), data.roomId(), data.type(),
+                NetworkStatus.ACTIVE, endpoint, data.hostNodeId(), data.createdAt());
+        roomManager.registerNetwork(updated);
+        System.out.println("网络已启动: " + data.id() + " [" + data.type() + "]");
+        System.out.println("本机已作为房间服务端,端点=" + endpoint);
+        System.out.println("成员将自动切换到该端点(经已建立网络),不再走云中继");
+    }
+
+    /** 停止房间网络:停止本机房间服务端,回退引导中继 */
+    private static void cmdNetworkStop(String[] args) throws IOException {
+        if (args.length < 2) {
+            System.err.println("Usage: network stop <id>");
+            return;
+        }
+        RoomNetwork data = findNetworkById(args[1]);
+        if (data == null) {
+            System.err.println("网络不存在: " + args[1]);
+            return;
+        }
+        roomManager.deactivateRoomServer();
+        RoomNetwork updated = new RoomNetwork(data.id(), data.roomId(), data.type(),
+                NetworkStatus.STOPPED, null, data.hostNodeId(), data.createdAt());
+        roomManager.registerNetwork(updated);
+        System.out.println("网络已停止: " + data.id() + ",已回退云中继");
+    }
+
+    private static RoomNetwork findNetworkById(String id) {
+        for (RoomNetwork n : roomManager.getNetworks()) {
+            if (n.id().equals(id)) return n;
+        }
+        return null;
+    }
+
+    private static Network buildNetwork(NetworkType type) {
+        if (type == NetworkType.NAT_TRAVERSAL) {
+            return new NatTraversalNetwork((NgrokAdapter) tools.get(TunnelType.NGROK));
+        }
+        return new VirtualNetwork((TailscaleAdapter) tools.get(TunnelType.TAILSCALE));
     }
 
     private static void reportMyStatus() {
@@ -950,9 +1023,11 @@ public final class Main {
                                             room join <link>         Join a room via link
                                             room leave               Leave current room
                                             room list                 Show current room & members
-                  network <create|list> [args]
+                  network <create|start|stop|list> [args]
                                           Manage networks in the current room
                                             network create <nat|virtual> <name>
+                                            network start <id>      Start network & become room server
+                                            network stop <id>       Stop network, fall back to cloud relay
                                             network list
                   help                    Show this help
                 Tools: ngrok, tailscale, syncthing""");

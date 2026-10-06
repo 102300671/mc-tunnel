@@ -47,6 +47,7 @@ public class RelayClient {
     private final List<RoomClosedHandler> roomClosedHandlers = new CopyOnWriteArrayList<>();
     private final List<ConnectionListener> connListeners = new CopyOnWriteArrayList<>();
     private final List<MemberStatusHandler> statusHandlers = new CopyOnWriteArrayList<>();
+    private final List<EndpointHandler> endpointHandlers = new CopyOnWriteArrayList<>();
     private Thread readThread;
 
     public RelayClient(String nodeId, String displayName) {
@@ -66,12 +67,15 @@ public class RelayClient {
     public interface ConnectionListener { void onDisconnected(); }
     /** 成员网络状态事件:onMemberStatus(nodeId, statusJson) */
     public interface MemberStatusHandler { void onMemberStatus(String nodeId, String statusJson); }
+    /** 房间服务端端点事件:onEndpoint(nodeId, endpoints) */
+    public interface EndpointHandler { void onEndpoint(String nodeId, java.util.List<String> endpoints); }
 
     public void onChat(ChatHandler h) { chatHandlers.add(h); }
     public void onMemberEvent(MemberEventHandler h) { memberHandlers.add(h); }
     public void onRoomClosed(RoomClosedHandler h) { roomClosedHandlers.add(h); }
     public void onDisconnect(ConnectionListener l) { connListeners.add(l); }
     public void onMemberStatus(MemberStatusHandler h) { statusHandlers.add(h); }
+    public void onEndpoint(EndpointHandler h) { endpointHandlers.add(h); }
 
     // ── 连接 ──────────────────────────────────────────────
 
@@ -163,6 +167,18 @@ public class RelayClient {
                 + "\",\"status\":" + statusJson + "}");
     }
 
+    /** 上报本机作为房间服务端的可达端点(成员据此从引导中继切换到已建立网络) */
+    public void sendEndpoint(java.util.List<String> endpoints) throws IOException {
+        StringBuilder arr = new StringBuilder("[");
+        for (int i = 0; i < endpoints.size(); i++) {
+            if (i > 0) arr.append(",");
+            arr.append("\"").append(esc(endpoints.get(i))).append("\"");
+        }
+        arr.append("]");
+        sendJson("{\"type\":\"room_endpoint\",\"nodeId\":\"" + esc(nodeId)
+                + "\",\"endpoints\":" + arr + "}");
+    }
+
     // ── 读循环 ────────────────────────────────────────────
 
     private void readLoop() {
@@ -239,6 +255,19 @@ public class RelayClient {
                 String status = extractJsonObject(text, "status");
                 if (nid != null && status != null) {
                     for (MemberStatusHandler h : statusHandlers) h.onMemberStatus(nid, status);
+                }
+            }
+            case "room_endpoint" -> {
+                String nid = field(text, "nodeId");
+                String arr = extractJsonArray(text, "endpoints");
+                if (nid != null && arr != null) {
+                    java.util.List<String> eps = new java.util.ArrayList<>();
+                    for (String s : splitJsonArray(arr)) {
+                        if (s != null && s.startsWith("\"")) {
+                            eps.add(s.substring(1, s.length() - 1).replace("\\\"", "\""));
+                        }
+                    }
+                    for (EndpointHandler h : endpointHandlers) h.onEndpoint(nid, eps);
                 }
             }
             // room_created / room_joined / error 等暂不特别处理
@@ -387,7 +416,16 @@ public class RelayClient {
         int i = 0;
         while (i < arr.length()) {
             char c = arr.charAt(i);
-            if (c == '{') {
+            if (c == '"') {
+                int j = i + 1;
+                for (; j < arr.length(); j++) {
+                    char ch = arr.charAt(j);
+                    if (ch == '\\') j++;
+                    else if (ch == '"') break;
+                }
+                out.add(arr.substring(i, j + 1));
+                i = j + 1;
+            } else if (c == '{') {
                 int depth = 0;
                 boolean inStr = false;
                 int j = i;

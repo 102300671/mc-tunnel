@@ -52,6 +52,14 @@ public class VirtualNetwork implements Network {
         }
         // 尝试获取本机 Tailscale 地址作为端点
         this.endpoint = detectTailscaleIp();
+        // 探测失败(如 tailscaled 由系统服务管理而 CLI 不可达)时,
+        // 允许通过环境变量 MCTUNNEL_ROOM_SERVER_ADDR 手动指定房主地址(host 或 host:port)
+        if (this.endpoint == null || this.endpoint.isBlank()) {
+            String manual = System.getenv("MCTUNNEL_ROOM_SERVER_ADDR");
+            if (manual != null && !manual.isBlank()) {
+                this.endpoint = manual.trim();
+            }
+        }
     }
 
     @Override

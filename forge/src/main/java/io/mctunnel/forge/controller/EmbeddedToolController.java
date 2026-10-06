@@ -1,5 +1,8 @@
 package io.mctunnel.forge.controller;
 
+import io.mctunnel.core.network.NatTraversalNetwork;
+import io.mctunnel.core.network.Network;
+import io.mctunnel.core.network.VirtualNetwork;
 import io.mctunnel.core.room.NetworkStatus;
 import io.mctunnel.core.room.NetworkType;
 import io.mctunnel.core.room.Room;
@@ -250,6 +253,71 @@ public class EmbeddedToolController implements ToolController {
                 roomManager.getCurrentRoom().hostNodeId(), System.currentTimeMillis());
         roomManager.registerNetwork(net);
         return "{\"id\":\"" + esc(net.id()) + "\",\"type\":\"" + esc(nt.name()) + "\"}";
+    }
+
+    @Override
+    public String networkStart(String id) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        if (roomManager.getCurrentRoom() == null) {
+            throw new IOException("请先加入或创建房间");
+        }
+        RoomNetwork data = findNetwork(id);
+        if (data == null) throw new IOException("网络不存在: " + id);
+        Network net = buildNetwork(data.type());
+        if (data.type() == NetworkType.NAT_TRAVERSAL) {
+            ((NatTraversalNetwork) net).setLocalPort(roomManager.getRoomServerPort());
+        }
+        net.start();
+        String endpoint = net.getEndpoint();
+        if (endpoint == null || endpoint.isBlank()) {
+            throw new IOException("未获取到对外端点(检查 ngrok/tailscale 状态)");
+        }
+        if (data.type() == NetworkType.VIRTUAL && !endpoint.contains(":")) {
+            endpoint = endpoint + ":" + roomManager.getRoomServerPort();
+        }
+        roomManager.activateAsRoomServer(endpoint);
+        roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
+                NetworkStatus.ACTIVE, endpoint, data.hostNodeId(), data.createdAt()));
+        return "{\"endpoint\":\"" + esc(endpoint) + "\",\"active\":true}";
+    }
+
+    @Override
+    public String networkStop(String id) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        RoomNetwork data = findNetwork(id);
+        if (data == null) throw new IOException("网络不存在: " + id);
+        roomManager.deactivateRoomServer();
+        roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
+                NetworkStatus.STOPPED, null, data.hostNodeId(), data.createdAt()));
+        return "{\"active\":false}";
+    }
+
+    @Override
+    public String networkConnect(String id) throws IOException {
+        if (roomManager == null) throw new IOException("房间管理器未初始化");
+        RoomNetwork data = findNetwork(id);
+        if (data == null) throw new IOException("网络不存在: " + id);
+        if (data.endpoint() == null || data.endpoint().isBlank()) {
+            throw new IOException("该网络尚未启动,无端点可连接");
+        }
+        roomManager.connectToEndpoint(data.endpoint());
+        return "{\"endpoint\":\"" + esc(data.endpoint()) + "\",\"active\":true}";
+    }
+
+    private RoomNetwork findNetwork(String id) {
+        for (RoomNetwork n : roomManager.getNetworks()) {
+            if (n.id().equals(id)) return n;
+        }
+        return null;
+    }
+
+    private Network buildNetwork(NetworkType type) {
+        if (type == NetworkType.NAT_TRAVERSAL) {
+            return new NatTraversalNetwork(
+                    (io.mctunnel.core.tunnel.NgrokAdapter) tools.get(TunnelType.NGROK));
+        }
+        return new VirtualNetwork(
+                (io.mctunnel.core.tunnel.TailscaleAdapter) tools.get(TunnelType.TAILSCALE));
     }
 
     /** JSON 字符串转义 */

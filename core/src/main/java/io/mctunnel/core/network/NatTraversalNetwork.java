@@ -23,8 +23,11 @@ public class NatTraversalNetwork implements Network {
     private String roomId;
     private String name;
     private String endpoint;
-    /** 默认映射的本地 Minecraft 端口 */
-    private int localPort = 25565;
+    /**
+     * 默认映射的本地房间中继端口(聊天/信令中继,与云中继端口统一 8721).
+     * Minecraft 游戏端口(25565)由游戏内 Ngrok 启动屏按需另开隧道.
+     */
+    private int localPort = 8721;
 
     public NatTraversalNetwork(NgrokAdapter adapter) {
         this.adapter = adapter;
@@ -50,8 +53,8 @@ public class NatTraversalNetwork implements Network {
 
     @Override
     public void start() throws IOException {
-        // 启动 ngrok http 隧道,映射本地 Minecraft 端口
-        TunnelInfo info = adapter.start("http", String.valueOf(localPort));
+        // 启动 ngrok tcp 隧道,映射本地房间中继端口(成员经已建立网络接入房间服务端)
+        TunnelInfo info = adapter.start("tcp", String.valueOf(localPort));
         if (info.publicUrl() != null) {
             this.endpoint = info.publicUrl();
         }

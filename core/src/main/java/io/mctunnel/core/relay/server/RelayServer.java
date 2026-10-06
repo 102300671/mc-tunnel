@@ -74,9 +74,25 @@ public class RelayServer {
             try { server.close(); } catch (IOException ignored) {}
             server = null;
         }
+        // 关闭所有活动连接:成员才能感知服务端停止并回退引导中继
+        for (WsConn c : rooms.allConnections()) {
+            c.running = false;
+            try { c.socket.close(); } catch (IOException ignored) {}
+        }
     }
 
     public int getPort() { return port; }
+
+    /**
+     * 预置房间:供房主设备上的本地中继使用(成员经已建立网络切过来时 join 同 roomId).
+     * 房主已作为成员加入;幂等(已存在则跳过).
+     */
+    public void preRegisterRoom(String roomId, String name, String hostNodeId) {
+        if (!rooms.hasRoom(roomId)) {
+            rooms.createRoom(roomId, name, hostNodeId);
+            rooms.addMember(roomId, new RoomMember(hostNodeId, "host", System.currentTimeMillis()));
+        }
+    }
 
     // ── 连接处理 ──────────────────────────────────────────
 
@@ -154,6 +170,7 @@ public class RelayServer {
             case "close_room" -> handleCloseRoom(conn);
             case "chat" -> handleChat(conn, text);
             case "member_status" -> handleMemberStatus(conn, text);
+            case "room_endpoint" -> handleRoomEndpoint(conn, text);
             case "ping" -> send(conn, "{\"type\":\"pong\"}");
             default -> { /* ignore */ }
         }
@@ -181,9 +198,15 @@ public class RelayServer {
         String roomId = field(text, "roomId");
         String displayName = field(text, "displayName");
         if (displayName == null) displayName = "member";
-        if (roomId == null || !rooms.hasRoom(roomId)) {
+        if (roomId == null) {
             send(conn, "{\"type\":\"error\",\"message\":\"房间不存在\"}");
             return;
+        }
+        if (!rooms.hasRoom(roomId)) {
+            // 引导中继重启后房间表丢失:成员重连时自动重建房间
+            rooms.createRoom(roomId, "Room", conn.nodeId);
+            System.out.println("[Relay] Room recreated by join: " + roomId
+                    + " by " + conn.nodeId);
         }
         String clientNodeId = field(text, "nodeId");
         if (clientNodeId != null && !clientNodeId.isBlank()) conn.nodeId = clientNodeId;
@@ -202,6 +225,13 @@ public class RelayServer {
             if (!e.getKey().equals(conn.nodeId)) {
                 send(conn, "{\"type\":\"member_status\",\"nodeId\":\"" + esc(e.getKey())
                         + "\",\"status\":" + e.getValue() + "}");
+            }
+        }
+        // 新成员加入:推送房间内已缓存的服务端端点(成员据此切换到已建立网络)
+        for (Map.Entry<String, String> e : rooms.endpoints(roomId).entrySet()) {
+            if (!e.getKey().equals(conn.nodeId)) {
+                send(conn, "{\"type\":\"room_endpoint\",\"nodeId\":\"" + esc(e.getKey())
+                        + "\",\"endpoints\":" + e.getValue() + "}");
             }
         }
         System.out.println("[Relay] " + conn.nodeId + " joined room " + roomId);
@@ -251,6 +281,20 @@ public class RelayServer {
                 + esc(nodeId) + "\",\"status\":" + status + "}", nodeId);
     }
 
+    /** 房间服务端端点上报:缓存并广播给房间内其他成员(上报者跳过) */
+    private void handleRoomEndpoint(WsConn conn, String text) {
+        if (conn.roomId == null) return;
+        String nodeId = field(text, "nodeId");
+        if (nodeId == null) return;
+        // 仅接受房间成员自身上报(防止冒名)
+        if (!rooms.isMember(conn.roomId, nodeId)) return;
+        String endpoints = extractJsonValue(text, "endpoints");
+        if (endpoints == null) return;
+        rooms.cacheEndpoint(conn.roomId, nodeId, endpoints);
+        broadcast(conn.roomId, "{\"type\":\"room_endpoint\",\"nodeId\":\""
+                + esc(nodeId) + "\",\"endpoints\":" + endpoints + "}", nodeId);
+    }
+
     // ── 广播 ──────────────────────────────────────────────
 
     private void broadcast(String roomId, String json, String excludeNodeId) {
@@ -281,6 +325,23 @@ public class RelayServer {
         while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
         if (start >= json.length()) return null;
         char c = json.charAt(start);
+        if (c == '[') {
+            int depth = 0;
+            boolean inStr = false;
+            for (int i = start; i < json.length(); i++) {
+                char ch = json.charAt(i);
+                if (inStr) {
+                    if (ch == '\\') i++;
+                    else if (ch == '"') inStr = false;
+                } else if (ch == '"') inStr = true;
+                else if (ch == '[') depth++;
+                else if (ch == ']') {
+                    depth--;
+                    if (depth == 0) return json.substring(start, i + 1);
+                }
+            }
+            return null;
+        }
         if (c == '{') {
             int depth = 0;
             boolean inStr = false;
@@ -484,10 +545,29 @@ public class RelayServer {
             return false;
         }
 
+        /** 全部房间的所有活动连接 */
+        java.util.List<WsConn> allConnections() {
+            java.util.List<WsConn> out = new java.util.ArrayList<>();
+            for (RoomState r : rooms.values()) out.addAll(r.connections());
+            return out;
+        }
+
         /** 房间内全部成员的已缓存状态快照 */
         java.util.Map<String, String> memberStatuses(String roomId) {
             RoomState r = rooms.get(roomId);
             return r == null ? java.util.Map.of() : new java.util.HashMap<>(r.memberStatus);
+        }
+
+        /** 缓存房间服务端端点(nodeId -> endpoints JSON 数组) */
+        void cacheEndpoint(String roomId, String nodeId, String endpoints) {
+            RoomState r = rooms.get(roomId);
+            if (r != null) r.endpoints.put(nodeId, endpoints);
+        }
+
+        /** 房间内全部已缓存端点快照 */
+        java.util.Map<String, String> endpoints(String roomId) {
+            RoomState r = rooms.get(roomId);
+            return r == null ? java.util.Map.of() : new java.util.HashMap<>(r.endpoints);
         }
     }
 
@@ -500,6 +580,8 @@ public class RelayServer {
         final Map<String, WsConn> conns = new ConcurrentHashMap<>();
         /** 成员网络状态缓存(nodeId -> status JSON 对象) */
         final Map<String, String> memberStatus = new ConcurrentHashMap<>();
+        /** 房间服务端端点缓存(nodeId -> endpoints JSON 数组) */
+        final Map<String, String> endpoints = new ConcurrentHashMap<>();
 
         RoomState(String roomId, String name, String hostNodeId) {
             this.roomId = roomId;
@@ -516,6 +598,7 @@ public class RelayServer {
             members.removeIf(x -> x.nodeId().equals(nodeId));
             conns.remove(nodeId);
             memberStatus.remove(nodeId);
+            endpoints.remove(nodeId);
         }
 
         List<RoomMember> members() {
