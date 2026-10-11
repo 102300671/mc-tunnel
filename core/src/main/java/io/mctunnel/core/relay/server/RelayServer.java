@@ -286,8 +286,8 @@ public class RelayServer {
         if (conn.roomId == null) return;
         String nodeId = field(text, "nodeId");
         if (nodeId == null) return;
-        // 仅接受房间成员自身上报(防止冒名)
-        if (!rooms.isMember(conn.roomId, nodeId)) return;
+        // 仅接受连接自身上报:成员会据此自动切换端点,冒用他人 nodeId 会造成中间人
+        if (!nodeId.equals(conn.nodeId)) return;
         String endpoints = extractJsonValue(text, "endpoints");
         if (endpoints == null) return;
         rooms.cacheEndpoint(conn.roomId, nodeId, endpoints);

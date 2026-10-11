@@ -51,6 +51,9 @@ public class RoomManager {
     /** 引导中继重连中标志(防并发重连) */
     private final java.util.concurrent.atomic.AtomicBoolean bootstrapReconnecting =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 中继代际号:leave/create/join/room_closed 时递增,使在途重连/切换线程的旧结果作废 */
+    private final java.util.concurrent.atomic.AtomicLong relayEpoch =
+            new java.util.concurrent.atomic.AtomicLong();
 
     public interface ChatHandler { void onChat(ChatMessage msg); }
     public interface MemberStatusHandler { void onMemberStatus(String nodeId, String statusJson); }
@@ -81,6 +84,8 @@ public class RoomManager {
      * 创建房间(房主).连接引导中继(云服务器),注册房间,返回加入链接.
      */
     public String createRoom(String relayHost, int relayPort, String name) throws IOException {
+        // 新一代中继上下文:使在途的重连/切换线程作废,避免其结果覆盖新房间
+        relayEpoch.incrementAndGet();
         bootstrapHost = relayHost;
         bootstrapPort = relayPort;
         bootstrapRelay = new RelayClient(selfNodeId, displayName);
@@ -103,6 +108,8 @@ public class RoomManager {
      * 通过链接加入房间(成员).连接引导中继并加入.
      */
     public void joinRoom(String link) throws IOException {
+        // 新一代中继上下文:使在途的重连/切换线程作废,避免其结果覆盖新房间
+        relayEpoch.incrementAndGet();
         JoinLink jl = LinkCodec.decode(link);
         bootstrapHost = jl.relayHost();
         bootstrapPort = jl.relayPort();
@@ -127,19 +134,29 @@ public class RoomManager {
 
     /** 离开/关闭房间.若当前节点是房主,关闭房间并通知所有成员 */
     public void leaveRoom() throws IOException {
-        stopLocalServer();
-        if (primaryRelay != null && primaryRelay != bootstrapRelay) {
-            try { primaryRelay.close(); } catch (Exception ignored) {}
-        }
-        if (bootstrapRelay != null) {
-            try {
-                if (isHost) bootstrapRelay.closeRoom();
-                else bootstrapRelay.leaveRoom();
-            } catch (IOException ignored) {}
-            try { bootstrapRelay.close(); } catch (Exception ignored) {}
+        // 新一代:使在途的重连/切换线程作废
+        relayEpoch.incrementAndGet();
+        RelayClient primary, bootstrap;
+        synchronized (this) {
+            // 先摘除字段再关连接:close() 触发的 onDisconnected 回调
+            // 将因 c != primaryRelay 且 c != bootstrapRelay 而不再触发回退/重连
+            primary = primaryRelay;
+            primaryRelay = null;
+            bootstrap = bootstrapRelay;
             bootstrapRelay = null;
+            activeEndpoint = null;
         }
-        primaryRelay = null;
+        stopLocalServer();
+        if (primary != null && primary != bootstrap) {
+            try { primary.close(); } catch (Exception ignored) {}
+        }
+        if (bootstrap != null) {
+            try {
+                if (isHost) bootstrap.closeRoom();
+                else bootstrap.leaveRoom();
+            } catch (IOException ignored) {}
+            try { bootstrap.close(); } catch (Exception ignored) {}
+        }
         if (currentRoom != null) {
             storage.removeRoomMember(currentRoom.id(), selfNodeId);
         }
@@ -147,7 +164,6 @@ public class RoomManager {
         members.clear();
         memberStatus.clear();
         isHost = false;
-        activeEndpoint = null;
     }
 
     // ── 房间服务端(房主) ──────────────────────────────────
@@ -295,7 +311,8 @@ public class RoomManager {
         c.onMemberStatus(this::onRelayMemberStatus);
         c.onEndpoint(this::onRoomEndpoint);
         c.onRoomClosed(rid -> {
-            // 房主关闭了房间,清理本地状态
+            // 房主关闭了房间,清理本地状态(代际号递增,作废在途重连/切换)
+            relayEpoch.incrementAndGet();
             stopLocalServer();
             if (primaryRelay != null && primaryRelay != bootstrapRelay) {
                 try { primaryRelay.close(); } catch (Exception ignored) {}
@@ -352,12 +369,18 @@ public class RoomManager {
     private synchronized void switchPrimary(String endpointHostPort, String publicEndpoint)
             throws IOException {
         if (currentRoom == null) return;
+        long epoch = relayEpoch.get();
         String[] hp = endpointHostPort.split(":");
         if (hp.length != 2) throw new IOException("端点格式应为 host:port: " + endpointHostPort);
         RelayClient c = new RelayClient(selfNodeId, displayName);
         wire(c);
         c.connect(hp[0], Integer.parseInt(hp[1]));
         c.joinRoomById(currentRoom.id());
+        if (relayEpoch.get() != epoch) {
+            // 连接期间已 leave/create/join,丢弃本次切换,避免旧结果覆盖新房间
+            try { c.close(); } catch (Exception ignored) {}
+            return;
+        }
         RelayClient old = primaryRelay;
         primaryRelay = c;
         activeEndpoint = publicEndpoint;
@@ -402,37 +425,64 @@ public class RoomManager {
     /** 引导中继断线重连:循环尝试直至成功(每 5s),成功后恢复房间挂名 */
     private void reconnectBootstrap() {
         if (!bootstrapReconnecting.compareAndSet(false, true)) return;
+        final long epoch = relayEpoch.get();
         Thread t = new Thread(() -> {
             try {
                 int attempt = 0;
                 while (!Thread.currentThread().isInterrupted()) {
+                    // 房间已离开/重建:放弃重连
+                    if (relayEpoch.get() != epoch) return;
                     attempt++;
                     try {
                         RelayClient nb = new RelayClient(selfNodeId, displayName);
-                        wire(nb);
-                        nb.connect(bootstrapHost, bootstrapPort);
+                        try {
+                            wire(nb);
+                            nb.connect(bootstrapHost, bootstrapPort);
+                        } catch (Exception e) {
+                            try { nb.close(); } catch (Exception ignored) {}
+                            throw e;
+                        }
+                        if (relayEpoch.get() != epoch) {
+                            // 连上时房间状态已变,丢弃新连接
+                            try { nb.close(); } catch (Exception ignored) {}
+                            return;
+                        }
                         if (currentRoom != null) nb.joinRoomById(currentRoom.id());
+                        if (relayEpoch.get() != epoch) {
+                            try { nb.close(); } catch (Exception ignored) {}
+                            return;
+                        }
                         RelayClient old;
+                        boolean swapped;
                         synchronized (this) {
-                            old = bootstrapRelay;
-                            bootstrapRelay = nb;
-                            if (primaryRelay == old || primaryRelay == null) {
-                                primaryRelay = nb;
+                            swapped = relayEpoch.get() == epoch;
+                            if (swapped) {
+                                old = bootstrapRelay;
+                                bootstrapRelay = nb;
+                                if (primaryRelay == old || primaryRelay == null) {
+                                    primaryRelay = nb;
+                                }
+                            } else {
+                                old = null;
                             }
+                        }
+                        if (!swapped) {
+                            try { nb.close(); } catch (Exception ignored) {}
+                            return;
                         }
                         if (old != null) {
                             try { old.close(); } catch (Exception ignored) {}
                         }
                         System.out.println("[Room] 引导中继已重连(" + attempt + "): "
                                 + bootstrapHost + ":" + bootstrapPort);
-                        break;
+                        return;
                     } catch (Exception e) {
                         System.out.println("[Room] 引导中继重连失败(" + attempt + "): "
                                 + e.getMessage());
                         try { Thread.sleep(5000); }
                         catch (InterruptedException ie) {
                             Thread.currentThread().interrupt();
-                            break;
+                            return;
                         }
                     }
                 }

@@ -337,13 +337,19 @@ public class RoomScreen extends Screen {
             return;
         }
         showMessage("启动网络...");
-        try {
-            String result = controller.networkStart(id);
-            showMessage("网络已启动: " + result);
-            refresh();
-        } catch (Exception e) {
-            showMessage("启动失败: " + e.getMessage());
-        }
+        Thread t = new Thread(() -> {
+            try {
+                String result = controller.networkStart(id);
+                this.minecraft.execute(() -> {
+                    showMessage("网络已启动: " + result);
+                    refresh();
+                });
+            } catch (Exception e) {
+                this.minecraft.execute(() -> showMessage("启动失败: " + e.getMessage()));
+            }
+        }, "mctunnel-net-start");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 停止房间网络(房主):停止本机房间服务端并回退云中继 */
@@ -353,13 +359,19 @@ public class RoomScreen extends Screen {
             showMessage("暂无网络可停止");
             return;
         }
-        try {
-            String result = controller.networkStop(id);
-            showMessage("网络已停止: " + result);
-            refresh();
-        } catch (Exception e) {
-            showMessage("停止失败: " + e.getMessage());
-        }
+        Thread t = new Thread(() -> {
+            try {
+                String result = controller.networkStop(id);
+                this.minecraft.execute(() -> {
+                    showMessage("网络已停止: " + result);
+                    refresh();
+                });
+            } catch (Exception e) {
+                this.minecraft.execute(() -> showMessage("停止失败: " + e.getMessage()));
+            }
+        }, "mctunnel-net-stop");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 连接房间网络端点(成员手动切换) */
@@ -369,13 +381,19 @@ public class RoomScreen extends Screen {
             showMessage("暂无网络可连接");
             return;
         }
-        try {
-            String result = controller.networkConnect(id);
-            showMessage("已连接: " + result);
-            refresh();
-        } catch (Exception e) {
-            showMessage("连接失败: " + e.getMessage());
-        }
+        Thread t = new Thread(() -> {
+            try {
+                String result = controller.networkConnect(id);
+                this.minecraft.execute(() -> {
+                    showMessage("已连接: " + result);
+                    refresh();
+                });
+            } catch (Exception e) {
+                this.minecraft.execute(() -> showMessage("连接失败: " + e.getMessage()));
+            }
+        }, "mctunnel-net-connect");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 取网络列表中第一个网络的 id */
