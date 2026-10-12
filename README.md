@@ -170,16 +170,16 @@ java -jar mctunnel.jar install ngrok --extract-dir "C:\ngrok" --authtoken <token
 
 ### 运行时数据
 
-数据目录由 `DataDir` 决定，两处宿主不同：
+数据目录统一为 `{gameDir}/mctunnel/`，`DataDir` 自身**不再提供任何兜底默认值**——宿主未调用 `DataDir.set()` 就读取会直接抛 `IllegalStateException`（历史上它曾默认 `~/.mctunnel/`，该路径现已废弃，那里的旧库与二进制缓存不再被读写）。
 
-- **Forge 模组**：默认 `~/.mctunnel/`
-- **独立 CLI**：`{gameDir}/mctunnel/`（`gameDir` 优先级：`--game-dir` 参数 > 环境变量 > jar 所在 `mods/` 上一级 > CWD 下有 `.minecraft` > `~/.minecraft` > CWD）
+- **Forge 模组**：`FMLPaths.GAMEDIR.get().resolve("mctunnel")`
+- **独立 CLI**：按优先级解析 gameDir —— `--game-dir` 参数 > 环境变量 `MCTUNNEL_GAME_DIR` > jar 所在 `mods/` 的上一级 > 当前目录下有 `.minecraft` > `~/.minecraft` > 当前工作目录
+- CLI 每次启动都会打印实际数据目录及其**命中来源**；落到最后一项（当前工作目录）时额外告警，提示换个目录运行会另建一份库，建议用 `--game-dir` 固定
 
-目录内文件布局：
-
+配置项与数据分离：模组配置走 Forge 标准 `ForgeConfigSpec`（`ModConfig.Type.COMMON`），落在 `<gameDir>/config/` 下的 toml 文件，不在 `mctunnel/` 数据目录里。
 ```
-~/.mctunnel/
-├── mctunnel.db              # SQLite 数据库(聊天记录/配置/节点) —— 仅客户端/房主侧
+{gameDir}/mctunnel/
+├── mctunnel.db              # SQLite 数据库(聊天记录/配置/节点)
 └── binaries/
     ├── ngrok/               # ngrok 二进制
     ├── tailscale/           # tailscale 二进制

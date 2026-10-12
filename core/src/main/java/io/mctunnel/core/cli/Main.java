@@ -43,7 +43,7 @@ import java.util.UUID;
  * java -jar mctunnel.jar start ngrok http 25565
  * java -jar mctunnel.jar status
  * </pre>
- * 数据目录与模组共用: {gameDir}/mctunnel/
+ * 数据目录与模组共用: {gameDir}/mctunnel/（模组侧取 FMLPaths.GAMEDIR；CLI 按上面规则命中，落到 CWD 兜底时会输出告警）
  */
 public final class Main {
 
@@ -130,6 +130,7 @@ public final class Main {
     /**
      * 检测游戏目录并设置 DataDir.
      * 优先级: --game-dir 参数 > 环境变量 > jar 所在 mods/ 的上一级 > CWD 下有 .minecraft > ~/.minecraft > CWD
+     * 命中哪条规则会打印出来；回退到 CWD 时额外告警，避免在不同目录运行时数据无声散落。
      */
     private static void resolveGameDir() {
         // 1. 显式指定
@@ -139,30 +140,42 @@ public final class Main {
         }
 
         Path gameDir;
+        String note = null;
+        String hint = null;
         if (explicit != null && !explicit.isBlank()) {
             gameDir = Paths.get(explicit).toAbsolutePath();
+            note = "显式指定（--game-dir 或环境变量 MCTUNNEL_GAME_DIR）";
         } else {
             // 2. jar 自身位置: 若在 mods/ 内,游戏目录是上一级
             Path jarDir = getJarDir();
             if (jarDir != null && "mods".equalsIgnoreCase(jarDir.getFileName().toString())) {
                 gameDir = jarDir.getParent();
+                note = "jar 位于 mods/ 内，取其上一级为游戏目录";
             } else {
                 // 3. CWD 下有 .minecraft?
                 Path cwd = Paths.get(".").toAbsolutePath();
                 if (Files.isDirectory(cwd.resolve(".minecraft"))) {
                     gameDir = cwd.resolve(".minecraft");
+                    note = "当前目录下发现 .minecraft";
                 } else if (Files.isDirectory(Paths.get(System.getProperty("user.home"), ".minecraft"))) {
                     // 4. 默认安装位置 ~/.minecraft
                     gameDir = Paths.get(System.getProperty("user.home"), ".minecraft");
+                    note = "使用默认安装位置 ~/.minecraft";
                 } else {
                     // 5. 回退到 CWD
                     gameDir = cwd;
+                    note = "以上均未命中，回退到当前工作目录";
+                    hint = "提示: 数据目录跟随当前工作目录，换个目录运行就会另建一份库；建议用 --game-dir <目录> 固定。";
                 }
             }
         }
 
         DataDir.set(gameDir.resolve("mctunnel"));
-        System.out.println("[MC-Tunnel] Data dir: " + DataDir.get());
+        System.out.println("[MC-Tunnel] Data dir: " + DataDir.get()
+                + (note == null ? "" : "  (来源: " + note + ")"));
+        if (hint != null) {
+            System.out.println("[MC-Tunnel] " + hint);
+        }
     }
 
     /** 获取 jar 所在目录(非 jar 场景返回 null) */
