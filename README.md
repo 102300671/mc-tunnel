@@ -170,7 +170,12 @@ java -jar mctunnel.jar install ngrok --extract-dir "C:\ngrok" --authtoken <token
 
 ### 运行时数据
 
-所有运行时文件位于 `~/.mctunnel/`：
+数据目录由 `DataDir` 决定，两处宿主不同：
+
+- **Forge 模组**：默认 `~/.mctunnel/`
+- **独立 CLI**：`{gameDir}/mctunnel/`（`gameDir` 优先级：`--game-dir` 参数 > 环境变量 > jar 所在 `mods/` 上一级 > CWD 下有 `.minecraft` > `~/.minecraft` > CWD）
+
+目录内文件布局：
 
 ```
 ~/.mctunnel/
