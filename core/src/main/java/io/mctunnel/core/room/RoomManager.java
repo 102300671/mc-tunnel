@@ -1,8 +1,14 @@
 package io.mctunnel.core.room;
 
-import io.mctunnel.core.chat.ChatMessage;
-import io.mctunnel.core.relay.client.RelayClient;
-import io.mctunnel.core.relay.server.RelayServer;
+import io.mctunnel.relay.protocol.RoomMember;
+import io.mctunnel.relay.protocol.JoinLink;
+import io.mctunnel.relay.protocol.LinkCodec;
+import io.mctunnel.relay.protocol.RoomNetwork;
+import io.mctunnel.relay.protocol.Room;
+
+import io.mctunnel.relay.protocol.ChatMessage;
+import io.mctunnel.relay.client.RelayClient;
+import io.mctunnel.relay.server.RelayServer;
 import io.mctunnel.core.storage.ChatStorage;
 
 import java.io.IOException;

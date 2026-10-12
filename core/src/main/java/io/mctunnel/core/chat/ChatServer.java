@@ -1,5 +1,7 @@
 package io.mctunnel.core.chat;
 
+import io.mctunnel.relay.protocol.ChatMessage;
+
 import io.mctunnel.core.storage.ChatStorage;
 
 import java.io.ByteArrayOutputStream;

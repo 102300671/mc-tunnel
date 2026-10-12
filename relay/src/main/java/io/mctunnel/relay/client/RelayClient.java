@@ -1,9 +1,9 @@
-package io.mctunnel.core.relay.client;
+package io.mctunnel.relay.client;
 
-import io.mctunnel.core.chat.ChatMessage;
-import io.mctunnel.core.room.JoinLink;
-import io.mctunnel.core.room.LinkCodec;
-import io.mctunnel.core.room.RoomMember;
+import io.mctunnel.relay.protocol.ChatMessage;
+import io.mctunnel.relay.protocol.JoinLink;
+import io.mctunnel.relay.protocol.LinkCodec;
+import io.mctunnel.relay.protocol.RoomMember;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

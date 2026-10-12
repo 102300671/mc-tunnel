@@ -1,7 +1,7 @@
 // 核心层:纯 Java,不引用 Forge/MC
-// 此模块被 forge 子模块依赖,内含 CLI/WebUI 入口(io.mctunnel.core.cli.Main)
+// 此模块依赖 :relay（房间协议与中继层），被 forge 子模块依赖，内含 CLI/WebUI 入口(io.mctunnel.core.cli.Main)
 plugins {
-    id 'java'
+	id 'java-library'
 }
 
 // 锁定 Java 17 (通过 foojay-resolver 自动下载)
@@ -12,6 +12,9 @@ base {
 }
 
 dependencies {
+    // 中继层：房间协议 DTO + 中继客户端/服务端（房主本地房间服务端用）
+    api project(':relay')
+
     // SQLite 驱动(仅后端持久化用;模组端若缺失会自动回退到内存存储)
     implementation 'org.xerial:sqlite-jdbc:3.46.1.0'
     // slf4j: sqlite-jdbc 依赖;Forge 环境自带,独立运行时用 nop 静默绑定

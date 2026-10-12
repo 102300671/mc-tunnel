@@ -1,8 +1,8 @@
 package io.mctunnel.core.network;
 
-import io.mctunnel.core.room.NetworkStatus;
-import io.mctunnel.core.room.NetworkType;
-import io.mctunnel.core.room.Room;
+import io.mctunnel.relay.protocol.NetworkStatus;
+import io.mctunnel.relay.protocol.NetworkType;
+import io.mctunnel.relay.protocol.Room;
 
 import java.io.IOException;
 
@@ -30,7 +30,7 @@ public interface Network {
      * @param name 网络名称
      * @return 网络数据快照
      */
-    io.mctunnel.core.room.RoomNetwork create(Room room, String name);
+    io.mctunnel.relay.protocol.RoomNetwork create(Room room, String name);
 
     /**
      * 启动网络(启动底层工具).

@@ -2,11 +2,11 @@ package io.mctunnel.core.web;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
-import io.mctunnel.core.chat.ChatMessage;
-import io.mctunnel.core.room.Room;
+import io.mctunnel.relay.protocol.ChatMessage;
+import io.mctunnel.relay.protocol.Room;
 import io.mctunnel.core.room.RoomManager;
-import io.mctunnel.core.room.RoomMember;
-import io.mctunnel.core.room.RoomNetwork;
+import io.mctunnel.relay.protocol.RoomMember;
+import io.mctunnel.relay.protocol.RoomNetwork;
 import io.mctunnel.core.tunnel.ExtractDirRequiredException;
 import io.mctunnel.core.tunnel.InstallOptions;
 import io.mctunnel.core.tunnel.SudoPasswordRequiredException;
@@ -440,12 +440,12 @@ class ApiHandler implements HttpHandler {
         String name = extractStringField(body, "name");
         if (name == null) name = "network";
         // 仅记录到存储,不自动启动底层工具
-        io.mctunnel.core.room.NetworkType nt = "virtual".equalsIgnoreCase(type)
-                ? io.mctunnel.core.room.NetworkType.VIRTUAL
-                : io.mctunnel.core.room.NetworkType.NAT_TRAVERSAL;
+        io.mctunnel.relay.protocol.NetworkType nt = "virtual".equalsIgnoreCase(type)
+                ? io.mctunnel.relay.protocol.NetworkType.VIRTUAL
+                : io.mctunnel.relay.protocol.NetworkType.NAT_TRAVERSAL;
         String netId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         RoomNetwork net = new RoomNetwork(netId, roomManager.getCurrentRoom().id(), nt,
-                io.mctunnel.core.room.NetworkStatus.CREATED, null,
+                io.mctunnel.relay.protocol.NetworkStatus.CREATED, null,
                 roomManager.getCurrentRoom().hostNodeId(), System.currentTimeMillis());
         roomManager.registerNetwork(net);
         WebServer.sendResponse(exchange, 200,
@@ -470,7 +470,7 @@ class ApiHandler implements HttpHandler {
                 return;
             }
             io.mctunnel.core.network.Network net;
-            if (data.type() == io.mctunnel.core.room.NetworkType.NAT_TRAVERSAL) {
+            if (data.type() == io.mctunnel.relay.protocol.NetworkType.NAT_TRAVERSAL) {
                 io.mctunnel.core.network.NatTraversalNetwork n =
                         new io.mctunnel.core.network.NatTraversalNetwork(
                                 (io.mctunnel.core.tunnel.NgrokAdapter) tools.get(TunnelType.NGROK));
@@ -487,12 +487,12 @@ class ApiHandler implements HttpHandler {
                         "{\"error\":\"未获取到对外端点(检查 ngrok/tailscale 状态)\"}");
                 return;
             }
-            if (data.type() == io.mctunnel.core.room.NetworkType.VIRTUAL && !endpoint.contains(":")) {
+            if (data.type() == io.mctunnel.relay.protocol.NetworkType.VIRTUAL && !endpoint.contains(":")) {
                 endpoint = endpoint + ":" + roomManager.getRoomServerPort();
             }
             roomManager.activateAsRoomServer(endpoint);
             roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
-                    io.mctunnel.core.room.NetworkStatus.ACTIVE, endpoint,
+                    io.mctunnel.relay.protocol.NetworkStatus.ACTIVE, endpoint,
                     data.hostNodeId(), data.createdAt()));
             WebServer.sendResponse(exchange, 200,
                     "{\"endpoint\":\"" + esc(endpoint) + "\",\"active\":true}");
@@ -519,7 +519,7 @@ class ApiHandler implements HttpHandler {
         }
         roomManager.deactivateRoomServer();
         roomManager.registerNetwork(new RoomNetwork(data.id(), data.roomId(), data.type(),
-                io.mctunnel.core.room.NetworkStatus.STOPPED, null,
+                io.mctunnel.relay.protocol.NetworkStatus.STOPPED, null,
                 data.hostNodeId(), data.createdAt()));
         WebServer.sendResponse(exchange, 200, "{\"active\":false}");
     }

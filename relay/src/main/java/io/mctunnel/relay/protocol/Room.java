@@ -1,4 +1,4 @@
-package io.mctunnel.core.room;
+package io.mctunnel.relay.protocol;
 
 /**
  * 房间(数据快照).

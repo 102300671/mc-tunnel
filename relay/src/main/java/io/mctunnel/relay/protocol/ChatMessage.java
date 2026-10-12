@@ -1,4 +1,4 @@
-package io.mctunnel.core.chat;
+package io.mctunnel.relay.protocol;
 
 import java.util.UUID;
 

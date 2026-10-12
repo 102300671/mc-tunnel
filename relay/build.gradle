@@ -1,0 +1,38 @@
+// 中继层：云中继 + 房主本地房间服务端 + 房间协议 DTO
+// 硬约束：只允许 JDK 依赖，禁止引用 io.mctunnel.core.*（由 :relay:check-boundary 强制）
+plugins {
+    id "java"
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+base {
+    archivesName = "mctunnel-relay"
+}
+
+dependencies {
+    // 零外部依赖：手写 WebSocket 帧 + 纯内存房间注册表，不引入 SQLite/slf4j
+}
+
+jar {
+    manifest {
+        attributes(
+            "Implementation-Title": "MC-Tunnel Relay",
+            "Main-Class": "io.mctunnel.relay.server.RelayServer"
+        )
+    }
+}
+
+// 架构边界守护：中继层不得反向依赖客户端层
+tasks.register("check-boundary") {
+    group = "verification"
+    description = "断言 relay 模块零 import io.mctunnel.core.*"
+    doLast {
+        def bad = fileTree("src/main/java").matching { include "**/*.java" }
+                .findAll { it.text.contains("import io.mctunnel.core") }
+        if (bad) {
+            throw new GradleException("依赖边界被破坏，以下文件引用了 core: " + bad.name)
+        }
+        println "[check-boundary] OK: relay 模块零 io.mctunnel.core.* 引用"
+    }
+}

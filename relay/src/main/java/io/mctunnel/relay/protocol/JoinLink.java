@@ -1,4 +1,4 @@
-package io.mctunnel.core.room;
+package io.mctunnel.relay.protocol;
 
 /**
  * 加入链接:解析后的结构化数据.

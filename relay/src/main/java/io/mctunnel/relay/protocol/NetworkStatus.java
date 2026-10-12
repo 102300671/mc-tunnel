@@ -1,4 +1,4 @@
-package io.mctunnel.core.room;
+package io.mctunnel.relay.protocol;
 
 /**
  * 房间内网络的运行状态.

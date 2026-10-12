@@ -1,11 +1,11 @@
 package io.mctunnel.core.storage;
 
-import io.mctunnel.core.chat.ChatMessage;
-import io.mctunnel.core.room.NetworkStatus;
-import io.mctunnel.core.room.NetworkType;
-import io.mctunnel.core.room.Room;
-import io.mctunnel.core.room.RoomMember;
-import io.mctunnel.core.room.RoomNetwork;
+import io.mctunnel.relay.protocol.ChatMessage;
+import io.mctunnel.relay.protocol.NetworkStatus;
+import io.mctunnel.relay.protocol.NetworkType;
+import io.mctunnel.relay.protocol.Room;
+import io.mctunnel.relay.protocol.RoomMember;
+import io.mctunnel.relay.protocol.RoomNetwork;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

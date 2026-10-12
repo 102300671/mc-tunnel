@@ -1,4 +1,4 @@
-package io.mctunnel.core.room;
+package io.mctunnel.relay.protocol;
 
 /**
  * 房间内注册的网络(数据快照).

@@ -1,4 +1,4 @@
-package io.mctunnel.core.room;
+package io.mctunnel.relay.protocol;
 
 import java.net.URI;
 import java.net.URISyntaxException;

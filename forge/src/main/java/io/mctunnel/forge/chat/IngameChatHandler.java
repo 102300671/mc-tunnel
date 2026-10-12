@@ -1,6 +1,6 @@
 package io.mctunnel.forge.chat;
 
-import io.mctunnel.core.chat.ChatMessage;
+import io.mctunnel.relay.protocol.ChatMessage;
 import io.mctunnel.core.chat.ChatWebSocketClient;
 import io.mctunnel.forge.MCTunnelMod;
 import net.minecraft.client.Minecraft;

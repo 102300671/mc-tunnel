@@ -1,8 +1,8 @@
-package io.mctunnel.core.relay.server;
+package io.mctunnel.relay.server;
 
-import io.mctunnel.core.chat.ChatMessage;
-import io.mctunnel.core.room.LinkCodec;
-import io.mctunnel.core.room.RoomMember;
+import io.mctunnel.relay.protocol.ChatMessage;
+import io.mctunnel.relay.protocol.LinkCodec;
+import io.mctunnel.relay.protocol.RoomMember;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -32,7 +32,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * <b>不承载 Minecraft 游戏流量</b>,仅处理信令与聊天.
  * <p>
  * 零依赖:基于 {@link ServerSocket} + 手写 WebSocket 握手与帧.
- * 启动入口: {@code java -cp mctunnel.jar io.mctunnel.core.relay.server.RelayServer [port]}
+ * 启动入口: {@code java -cp mctunnel.jar io.mctunnel.relay.server.RelayServer [port]}
  */
 public class RelayServer {
 
