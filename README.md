@@ -22,23 +22,49 @@ MC-Tunnel 帮助玩家快速搭建和管理内网穿透与虚拟组网工具（n
 
 ## 架构
 
-多模块 Gradle 项目，**单一产物**：模组 jar 同时是可独立执行的 jar。
+多模块 Gradle 项目，**三个产物**，依赖方向严格单向：`forge → core → relay`。
 
 ```
 mc-tunnel/
-├── core/          # 共享逻辑: 隧道适配、Web 服务、聊天、存储、CLI 入口
-└── forge/         # Forge 1.20.1 模组(内嵌全部功能 + 游戏内 GUI)
+├── relay/         # 中继层（零外部依赖）：云中继 + 房主本地房间服务端 + 房间协议 DTO
+│   ├── protocol/  #   ChatMessage / Room / RoomMember / JoinLink / LinkCodec
+│   │              #   RoomNetwork / NetworkType / NetworkStatus
+│   ├── server/    #   RelayServer（含内部 RoomRegistry，纯内存）
+│   └── client/    #   RelayClient
+├── core/          # 客户端层：隧道适配、Web 服务、聊天服务端与存储、CLI 入口、RoomManager
+└── forge/         # Forge 1.20.1 模组（内嵌 core + relay 全部类 + 游戏内 GUI）
 ```
 
+### 三产物
+
+| 产物 | 路径 | 大小量级 | 用途 |
+|------|------|----------|------|
+| `mctunnel-relay.jar` | `relay/build/libs/` | 约 34 KB | **云中继**（常驻公网引导）与**房主本地房间服务端**，`java -jar` 直启 |
+| `mctunnel-core.jar` | `core/build/libs/` | 约 181 KB | 客户端库产物，供 CLI/其他宿主引用 |
+| `mctunnel.jar` | `forge/build/libs/` | 约 14.5 MB | Forge 模组，同时可 `java -jar ... serve` 独立运行 |
+
+### 职责边界（硬契约）
+
+| 层 | 承担 | 明确不承担 |
+|---|---|---|
+| 云中继 | 房间信令、成员在线状态、`room_endpoint` 地址交换、破冰阶段聊天帧转发 | **Minecraft 游戏流量**、任何持久化、任何隧道工具能力（ngrok / Tailscale / SyncThing 一概不碰） |
+| 房主本地房间服务端 | 房间存续期的成员管理与状态、聊天落 SQLite（`~/.mctunnel/`） | — |
+| 已建立网络（数据面） | MC 游戏包（Tailscale 直连优先）、网络建立后的 P2P 聊天 | — |
+| ngrok | 打洞失败时的兜底路径：映射房主 25565 端口 | 不作为默认路径 |
+
+**为什么数据面不走云中继**：云服务器为 `ecs.e-c1m1.large`（2 vCPU / 2 GiB / **3 Mbps 固定公网带宽 ≈ 375 KB/s**，共享调度无性能 SLA），而两个玩家的 Minecraft 流量即需 2–5 Mbit/s（进服拉区块更高）；该链路同时是 SSH(22) 的唯一入口，打满会把自己关在门外。控制面是 KB 级流量，中继常驻实测 RSS 约 36 MB、CPU 0.0%。
+
+**依赖边界守护**：`:relay:check-boundary` 任务断言 relay 模块零 `import io.mctunnel.core.*`，构建即校验，防止中继层被客户端能力反向污染。
+
 **核心设计**：
-- 零外部依赖（JDK 内置 HttpServer + 手写 WebSocket/JSON）
+- 中继层零外部依赖（JDK 内置 `ServerSocket` + 手写 WebSocket 帧），不引入 SQLite/slf4j
 - 模组即完整应用：桌面端游戏内直接驱动工具，WebUI 只是可选的 HTTP 门面，可在游戏内随时开关
 - 游戏外可直接 `java -jar mctunnel.jar serve` 启动 WebUI（Android/Termux 场景）
-- 存储（SQLite）、组网在后端完成
+- 存储（SQLite）与房间状态持久化都在**客户端/房主侧**，云中继不落任何库
 
 ### 打包说明（slf4j 与 Forge 模块冲突）
 
-mctunnel.jar 同时是 Forge 模组和可执行 jar，但 slf4j 的打包方式必须区分两种运行环境：
+mctunnel.jar 同时是 Forge 模组和可执行 jar，但 slf4j 的打包方式必须区分两种运行环境（中继拆成独立模块后，`mctunnel-relay.jar` 零依赖、完全不涉及此问题）：
 
 - **Forge 内运行**：游戏启动层自带 `org.slf4j` 模块。slf4j-api 的 class 绝不能展开打进模组 jar，否则模块层报 `ResolutionException: Module mctunnel contains package org.slf4j.spi ...`（split package），游戏在模组加载前直接崩溃（2026-10-03 实测）。
 - **独立运行（java -jar）**：sqlite-jdbc 需要 slf4j-api + 一个绑定。打包时把 `slf4j-api`/`slf4j-nop` 两个完整 jar 作为资源放在 `standalone-lib/`（不展开）；Manifest 的 Main-Class 是 `io.mctunnel.core.bootstrap.StandaloneLauncher`，它运行时把嵌套 jar 解到临时目录，用 platform loader 为父的 URLClassLoader 加载后再反射进入 `io.mctunnel.core.cli.Main`。Forge 加载模组时这些资源被完全忽略。
@@ -48,11 +74,17 @@ mctunnel.jar 同时是 Forge 模组和可执行 jar，但 slf4j 的打包方式�
 要求 JDK 17+。
 
 ```bash
-# 构建(唯一产物即模组 jar)
+# 构建(三个产物)
 ./gradlew build
 ```
 
-产物位置：`forge/build/libs/mctunnel.jar`
+产物位置：
+
+- `forge/build/libs/mctunnel.jar` — Forge 模组 / 可独立执行（`serve`）
+- `relay/build/libs/mctunnel-relay.jar` — 云中继，`java -jar mctunnel-relay.jar [port] [public-host]`
+- `core/build/libs/mctunnel-core.jar` — 客户端库
+
+架构校验：`./gradlew :relay:check-boundary`（relay 不得 import core）。
 
 ## 使用
 
@@ -132,6 +164,9 @@ java -jar mctunnel.jar install ngrok --extract-dir "C:\ngrok" --authtoken <token
 | `MCTUNNEL_CHAT_PORT` | `8788` | 聊天 WebSocket 端口 |
 | `MCTUNNEL_NODE_ID` | 自动生成 | 本节点 ID（用于组网） |
 | `MCTUNNEL_PEERS` | 空 | 对等节点地址，逗号分隔（如 `ws://a:8788,ws://b:8788`） |
+| `MCTUNNEL_WEB_PORT` | `8787` | WebUI HTTP 端口 |
+| `MCTUNNEL_RELAY_PORT` | `8721` | 云中继地址的默认端口 |
+| `MCTUNNEL_ROOM_SERVER_PORT` | `8721` | 房主本地房间中继端口 |
 
 ### 运行时数据
 
@@ -139,12 +174,14 @@ java -jar mctunnel.jar install ngrok --extract-dir "C:\ngrok" --authtoken <token
 
 ```
 ~/.mctunnel/
-├── mctunnel.db              # SQLite 数据库(聊天记录/配置/节点)
+├── mctunnel.db              # SQLite 数据库(聊天记录/配置/节点) —— 仅客户端/房主侧
 └── binaries/
     ├── ngrok/               # ngrok 二进制
     ├── tailscale/           # tailscale 二进制
     └── syncthing/           # syncthing 二进制
 ```
+
+> 云中继**不落任何盘**：房间注册表是 `RelayServer` 内部纯内存结构，进程重启即清空；成员凭 `mctunnel://` 链接重连时按需重建房间。
 
 ## Android / FCL 部署
 
